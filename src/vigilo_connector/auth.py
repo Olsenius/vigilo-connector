@@ -11,6 +11,7 @@ Refresh-tokens roterer ved bruk og utløper etter 30-90 dager; da må
 import base64
 import json
 import secrets
+import threading
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -122,6 +123,9 @@ class TokenStore:
 
     def __init__(self, path=TOKEN_FILE):
         self.path = path
+        # Refresh-tokens roterer ved bruk: to samtidige refresh-kall med samme
+        # token gir invalid_grant og kan miste det nye tokenet. Serialiser alt.
+        self._lock = threading.Lock()
 
     def load(self) -> dict:
         if not self.path.exists():
@@ -134,13 +138,14 @@ class TokenStore:
         write_json_atomic(self.path, tokens)
 
     def access_token(self, force_refresh: bool = False) -> str:
-        tokens = self.load()
-        expires_at = tokens.get("obtained_at", 0) + tokens.get("expires_in", 0)
-        if force_refresh or time.time() > expires_at - EXPIRY_MARGIN:
-            refresh_token = tokens.get("refresh_token")
-            if not refresh_token:
-                raise AuthError("Mangler refresh-token — kjør `vigilo-login` på nytt.")
-            new_tokens = refresh(refresh_token)
-            tokens.update(new_tokens)
-            self.save(tokens)
-        return tokens["access_token"]
+        with self._lock:
+            tokens = self.load()
+            expires_at = tokens.get("obtained_at", 0) + tokens.get("expires_in", 0)
+            if force_refresh or time.time() > expires_at - EXPIRY_MARGIN:
+                refresh_token = tokens.get("refresh_token")
+                if not refresh_token:
+                    raise AuthError("Mangler refresh-token — kjør `vigilo-login` på nytt.")
+                new_tokens = refresh(refresh_token)
+                tokens.update(new_tokens)
+                self.save(tokens)
+            return tokens["access_token"]

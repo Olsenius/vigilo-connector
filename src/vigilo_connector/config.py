@@ -7,6 +7,7 @@ aldri sjekkes inn.
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 AUTH_BASE = "https://auth.prod.vigilo-oas.no"
@@ -40,9 +41,19 @@ def load_client_credentials() -> tuple[str, str]:
 
 
 def write_json_atomic(path: Path, payload) -> None:
-    """Skriv via tempfil + rename, så en avbrutt skriving aldri korrumperer tokens."""
+    """Skriv via tempfil + rename, så en avbrutt skriving aldri korrumperer tokens.
+
+    Tempfila må ha unikt navn: med et fast `.tmp`-navn kan to samtidige skrivere
+    rename-e hverandres fil bort og feile med FileNotFoundError.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2))
-    tmp.replace(path)
-    path.chmod(0o600)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(payload, indent=2))
+        tmp.chmod(0o600)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
