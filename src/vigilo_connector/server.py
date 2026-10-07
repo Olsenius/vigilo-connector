@@ -21,6 +21,12 @@ def client() -> VigiloClient:
     return _client
 
 
+def use_client(c: VigiloClient) -> None:
+    """Bruk en bestemt klient i verktøyene (f.eks. med egen TokenStore i gatewayen)."""
+    global _client
+    _client = c
+
+
 def list_children() -> str:
     """List barna knyttet til den innloggede foresatte, med childId."""
     return json.dumps(client().get_children(), ensure_ascii=False, indent=2)

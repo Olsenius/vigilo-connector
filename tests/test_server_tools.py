@@ -31,3 +31,13 @@ async def test_register_tools_gir_alle_verktoy():
 
 async def test_stdio_serveren_har_samme_verktoy():
     assert await _names(server.mcp) == EXPECTED
+
+
+def test_use_client_setter_klienten_verktoyene_bruker():
+    sentinel = object()
+    old = server._client
+    try:
+        server.use_client(sentinel)
+        assert server.client() is sentinel
+    finally:
+        server._client = old

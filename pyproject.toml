@@ -16,6 +16,7 @@ dev = ["pytest>=8"]
 [project.scripts]
 vigilo-login = "vigilo_connector.login:main"
 vigilo-mcp = "vigilo_connector.server:main"
+vigilo-gateway = "vigilo_connector.gateway.app:main"
 
 [build-system]
 requires = ["hatchling"]
