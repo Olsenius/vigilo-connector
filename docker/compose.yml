@@ -1,0 +1,54 @@
+# Vigilo MCP-gateway bak Tailscale Funnel.
+#
+#   cp .env.example .env    # fyll inn TS_AUTHKEY
+#   docker compose -f docker/compose.yml --env-file .env up -d
+#
+# Gatewayen deler nettverk med Tailscale-containeren og lytter bare på
+# 127.0.0.1:8000 der. Funnel gjør https://<TS_HOSTNAME>.<tailnet>.ts.net offentlig.
+name: vigilo
+
+services:
+  vigilo-ts:
+    image: tailscale/tailscale:stable
+    container_name: vigilo-ts
+    hostname: ${TS_HOSTNAME:-vigilo}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?Sett TS_AUTHKEY i .env}
+      TS_HOSTNAME: ${TS_HOSTNAME:-vigilo}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      TS_USERSPACE: "true"
+      TS_SERVE_CONFIG: /config/serve.json
+    volumes:
+      - ts-state:/var/lib/tailscale
+      - ts-socket:/var/run/tailscale
+      - ./serve.json:/config/serve.json:ro
+    restart: unless-stopped
+
+  vigilo-gateway:
+    image: ${VIGILO_IMAGE:-ghcr.io/olsenius/vigilo-connector:latest}
+    container_name: vigilo-gateway
+    network_mode: service:vigilo-ts
+    depends_on:
+      - vigilo-ts
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      API_TOKEN: ${API_TOKEN:-}
+      VIGILO_CLIENT_ID: ${VIGILO_CLIENT_ID:-}
+      VIGILO_CLIENT_SECRET: ${VIGILO_CLIENT_SECRET:-}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      TAILSCALE_SOCKET: /var/run/tailscale/tailscaled.sock
+    volumes:
+      - data:/data
+      - ts-socket:/var/run/tailscale
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  data:
+  ts-state:
+  ts-socket:
