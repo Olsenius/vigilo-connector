@@ -11,7 +11,6 @@ from mcp.server.mcpserver import MCPServer
 
 from .client import VigiloClient
 
-mcp = MCPServer("vigilo")
 _client: VigiloClient | None = None
 
 
@@ -22,13 +21,11 @@ def client() -> VigiloClient:
     return _client
 
 
-@mcp.tool()
 def list_children() -> str:
     """List barna knyttet til den innloggede foresatte, med childId."""
     return json.dumps(client().get_children(), ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
 def list_message_threads(child_id: str, page_size: int = 50) -> str:
     """List beskjedtråder for et barn (bruk childId fra list_children).
 
@@ -39,13 +36,11 @@ def list_message_threads(child_id: str, page_size: int = 50) -> str:
     )
 
 
-@mcp.tool()
 def get_message_thread(thread_uid: str) -> str:
     """Hent alle meldingene i en tråd, inkl. vedleggs-URL-er."""
     return json.dumps(client().get_thread(thread_uid), ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
 def read_message_attachments(thread_uid: str) -> str:
     """Last ned og les vedleggene i en meldingstråd (f.eks. ukeplan-PDF).
 
@@ -58,7 +53,6 @@ def read_message_attachments(thread_uid: str) -> str:
     )
 
 
-@mcp.tool()
 def read_post_attachments(post_id: str) -> str:
     """Last ned og les vedleggene i et oppslag/«Siste nytt»-post (PDF/docx→tekst).
 
@@ -69,7 +63,6 @@ def read_post_attachments(post_id: str) -> str:
     return json.dumps(client().read_post_attachments(post_id), ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
 def api_get(path: str, params_json: str = "{}") -> str:
     """Rått GET mot foreldre-API-et — for kartlegging av nye endepunkter.
 
@@ -93,7 +86,6 @@ def api_get(path: str, params_json: str = "{}") -> str:
 # childId og organizationalUnitId hentes fra web_list_children.
 
 
-@mcp.tool()
 def web_list_children() -> str:
     """List barna med childId og organizationalUnitId (flatet ut).
 
@@ -103,7 +95,6 @@ def web_list_children() -> str:
     return json.dumps(client().children(), ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
 def news_feed(child_id: str, from_date: str = "", to_date: str = "") -> str:
     """Oppslag/«Siste nytt» for et barn. Datoer YYYY-MM-DD (default: siste 30 dager)."""
     return json.dumps(
@@ -112,13 +103,11 @@ def news_feed(child_id: str, from_date: str = "", to_date: str = "") -> str:
     )
 
 
-@mcp.tool()
 def absences(child_id: str) -> str:
     """Fravær for et barn."""
     return json.dumps(client().absences(child_id), ensure_ascii=False, indent=2)
 
 
-@mcp.tool()
 def consent_forms(child_id: str, organizational_unit_id: str) -> str:
     """Samtykkeskjemaer for et barn (krever organizationalUnitId)."""
     return json.dumps(
@@ -126,7 +115,6 @@ def consent_forms(child_id: str, organizational_unit_id: str) -> str:
     )
 
 
-@mcp.tool()
 def timetable(child_id: str, organizational_unit_id: str, week: str = "") -> str:
     """Timeplan/ukesplan for en ISO-uke ("YYYY-WW", default inneværende uke)."""
     return json.dumps(
@@ -135,7 +123,6 @@ def timetable(child_id: str, organizational_unit_id: str, week: str = "") -> str
     )
 
 
-@mcp.tool()
 def scheduling_events(child_id: str, organizational_unit_id: str, week: str = "") -> str:
     """Timeplan-hendelser (prøver, aktiviteter) for en ISO-uke ("YYYY-WW")."""
     return json.dumps(
@@ -144,7 +131,6 @@ def scheduling_events(child_id: str, organizational_unit_id: str, week: str = ""
     )
 
 
-@mcp.tool()
 def web_api_get(path: str, params_json: str = "{}") -> str:
     """Rått GET mot web-foreldreportalen — for kartlegging av nye web-endepunkter.
 
@@ -159,6 +145,37 @@ def web_api_get(path: str, params_json: str = "{}") -> str:
     except ValueError:
         pass
     return f"HTTP {r.status_code}\n{body[:20000]}"
+
+
+TOOLS = (
+    list_children,
+    list_message_threads,
+    get_message_thread,
+    read_message_attachments,
+    read_post_attachments,
+    api_get,
+    web_list_children,
+    news_feed,
+    absences,
+    consent_forms,
+    timetable,
+    scheduling_events,
+    web_api_get,
+)
+
+
+def register_tools(server: MCPServer) -> None:
+    """Registrer alle verktøyene på en MCP-server.
+
+    Brukes både av stdio-serveren under og av remote-gatewayen
+    (`vigilo_connector.gateway`), så verktøyene defineres ett sted.
+    """
+    for fn in TOOLS:
+        server.add_tool(fn)
+
+
+mcp = MCPServer("vigilo")
+register_tools(mcp)
 
 
 def main() -> None:
