@@ -252,3 +252,30 @@ def test_limiter_slipper_til_etter_sperretid():
     assert lim.blocked("ip")
     t[0] += 15 * 60 + 1
     assert not lim.blocked("ip")
+
+
+async def test_forfalsket_x_forwarded_for_omgaar_ikke_sperren(env):
+    # Klienten kan selv sende X-Forwarded-For; proxyen (Tailscale) legger til
+    # den ekte IP-en sist. Bare den siste verdien kan stoles på.
+    req = await env.pending()
+    for i in range(5):
+        page = env.client.get(f"/login?req={req}")
+        env.client.post(
+            "/login",
+            data={"req": req, "password": "feil-passord-xyz", "csrf": _csrf(page.text)},
+            headers={"X-Forwarded-For": f"10.0.0.{i}, 203.0.113.9"},
+        )
+    page = env.client.get(f"/login?req={req}")
+    r = env.client.post(
+        "/login",
+        data={"req": req, "password": PASSWORD, "csrf": _csrf(page.text)},
+        headers={"X-Forwarded-For": "10.0.0.99, 203.0.113.9"},
+    )
+    assert r.status_code == 429
+
+
+def test_limiter_vokser_ikke_uten_grense():
+    lim = LoginLimiter(max_keys=100)
+    for i in range(1000):
+        lim.fail(f"ip{i}")
+    assert len(lim._failures) <= 100

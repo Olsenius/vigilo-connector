@@ -32,8 +32,9 @@ class LoginLimiter:
     """Maks `max_failures` feil per nøkkel innen `window` sekunder, deretter sperre."""
 
     def __init__(self, max_failures: int = 5, window: float = 900, block: float = 900,
-                 now: Callable[[], float] = time.time):
+                 now: Callable[[], float] = time.time, max_keys: int = 10_000):
         self._max, self._window, self._block, self._now = max_failures, window, block, now
+        self._max_keys = max_keys
         self._failures: dict[str, list[float]] = {}
         self._blocked_until: dict[str, float] = {}
 
@@ -49,6 +50,9 @@ class LoginLimiter:
 
     def fail(self, key: str) -> None:
         now = self._now()
+        if key not in self._failures and len(self._failures) >= self._max_keys:
+            # Hindre at mange ulike IP-er fyller minnet: dropp den eldste telleren.
+            self._failures.pop(next(iter(self._failures)))
         recent = [t for t in self._failures.get(key, []) if now - t < self._window] + [now]
         self._failures[key] = recent
         if len(recent) >= self._max:
@@ -59,9 +63,10 @@ class LoginLimiter:
 
 
 def _client_key(request: Request) -> str:
-    # Tailscale Funnel/Serve setter X-Forwarded-For. Uten den deler alle én teller.
+    # Tailscale Funnel/Serve legger klientens IP til *sist* i X-Forwarded-For;
+    # tidligere verdier kan klienten ha satt selv. Uten headeren deler alle én teller.
     fwd = request.headers.get("x-forwarded-for", "")
-    return fwd.split(",")[0].strip() or "global"
+    return fwd.split(",")[-1].strip() or "global"
 
 
 class _Signer:
