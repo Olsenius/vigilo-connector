@@ -5,7 +5,7 @@ MCP-server, slik at den kan brukes fra claude.ai (web og mobil), Claude Code,
 Codex, Hermes, OpenClaw og andre MCP-klienter — ikke bare som lokal
 stdio-server.
 
-Status: design, ikke implementert.
+Status: implementert (`vigilo_connector.gateway`).
 
 ## Mål
 

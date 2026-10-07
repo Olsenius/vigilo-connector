@@ -127,6 +127,112 @@ stdio-transport med samme kommando:
 }
 ```
 
+## Remote MCP (Docker + Tailscale Funnel)
+
+Vil du bruke connectoren fra claude.ai (web og mobil), eller dele én
+installasjon mellom flere klienter (Claude Code, Codex, Hermes, OpenClaw …),
+kan den kjøres som en *remote* MCP-server: `vigilo-gateway` i Docker, med en
+Tailscale-container som gir en offentlig HTTPS-adresse via
+[Funnel](https://tailscale.com/kb/1223/funnel). Ingen eget domene, ingen
+åpne porter inn. Design og begrunnelser: [`docs/remote-gateway.md`](docs/remote-gateway.md).
+
+Gatewayen har innebygd OAuth 2.1 (Dynamic Client Registration + PKCE): når en
+klient kobler til, åpnes en innloggingsside der du skriver gatewayens
+passord. Vigilo-innloggingen gjøres på `/setup` i nettleseren.
+
+### Krav i tailnettet (én gang)
+
+1. Slå på **HTTPS Certificates** (admin-konsollen → DNS).
+2. Policyen må gi `funnel`-attributtet. Nye tailnets har det for
+   `autogroup:member`; bruker du en tag, legg til f.eks.:
+
+   ```json
+   "tagOwners": { "tag:vigilo": ["autogroup:admin"] },
+   "nodeAttrs": [{ "target": ["tag:vigilo"], "attr": ["funnel"] }]
+   ```
+
+   Noden trenger ingen tilgang til resten av tailnettet — ikke gi `tag:vigilo`
+   noen `grants`/`acls`.
+3. Lag en auth key (Settings → Keys): ikke-ephemeral, gjerne tagget
+   `tag:vigilo` og forhåndsgodkjent.
+
+### Start
+
+```bash
+git clone https://github.com/olsenius/vigilo-connector && cd vigilo-connector
+cp .env.example .env          # sett TS_AUTHKEY
+docker compose -f docker/compose.yml --env-file .env up -d
+docker logs vigilo-gateway    # viser adressen og det genererte passordet
+```
+
+Passordet vises bare første gang. Senere:
+`docker exec vigilo-gateway vigilo-gateway show-password`.
+
+Uten compose, med to `docker run`:
+
+```bash
+docker volume create vigilo-data; docker volume create vigilo-ts-state; docker volume create vigilo-ts-socket
+docker run -d --name vigilo-ts --hostname vigilo --restart unless-stopped \
+  -e TS_AUTHKEY=tskey-auth-... -e TS_HOSTNAME=vigilo -e TS_USERSPACE=true \
+  -e TS_STATE_DIR=/var/lib/tailscale -e TS_SOCKET=/var/run/tailscale/tailscaled.sock \
+  -e TS_SERVE_CONFIG=/config/serve.json \
+  -v vigilo-ts-state:/var/lib/tailscale -v vigilo-ts-socket:/var/run/tailscale \
+  -v "$PWD/docker/serve.json:/config/serve.json:ro" \
+  tailscale/tailscale:stable
+docker run -d --name vigilo-gateway --network container:vigilo-ts --restart unless-stopped \
+  --read-only --tmpfs /tmp \
+  -v vigilo-data:/data -v vigilo-ts-socket:/var/run/tailscale \
+  ghcr.io/olsenius/vigilo-connector:latest
+```
+
+### Logg inn hos Vigilo
+
+Åpne `https://vigilo.<tailnet>.ts.net/setup`, logg inn med passordet og:
+
+1. Legg inn Vigilo-nøklene (se [steg 1](#1-client-credentials-fra-android-appen)),
+   eller sett `VIGILO_CLIENT_ID`/`VIGILO_CLIENT_SECRET` i `.env`.
+2. Trykk **Start innlogging**, følg instruksjonene og lim inn det nettleseren
+   gir deg: `app://…?code=…`-adressen, «Copy as cURL» for
+   `authorize`-requesten, eller svaret med `location:`-headeren.
+3. Har du allerede en `tokens.json` fra `vigilo-login`, kan du importere den i
+   stedet.
+
+Samme sted fornyer du innloggingen når Vigilos refresh-token utløper (30–90 dager).
+
+### Koble til klienter
+
+MCP-adressen er `https://vigilo.<tailnet>.ts.net/mcp`.
+
+- **claude.ai** (følger med til desktop og mobil): Customize → Connectors →
+  Add custom connector → lim inn adressen. Velg «Register automatically»
+  dersom du blir spurt om OAuth-klient.
+- **Claude Code**: `claude mcp add -s user --transport http vigilo https://vigilo.<tailnet>.ts.net/mcp`,
+  deretter `/mcp` for å logge inn.
+- **Codex**: `codex mcp add vigilo --url https://vigilo.<tailnet>.ts.net/mcp`,
+  deretter `codex mcp login vigilo`.
+- **Klienter uten OAuth**: sett `API_TOKEN` (minst 32 tegn, f.eks.
+  `openssl rand -hex 32`) og send `Authorization: Bearer <API_TOKEN>`.
+
+**Bruk bare én instans per Vigilo-innlogging.** Refresh-tokenet roterer ved
+bruk; kjører du både lokal `vigilo-mcp` og gatewayen med hver sin kopi av
+`tokens.json`, logger de hverandre ut.
+
+### Konfigurasjon
+
+| Variabel | Standard | |
+|---|---|---|
+| `TS_AUTHKEY` | — | påkrevd første gang |
+| `TS_HOSTNAME` | `vigilo` | første del av adressen |
+| `ADMIN_PASSWORD` | generert | minst 12 tegn |
+| `API_TOKEN` | av | minst 32 tegn |
+| `VIGILO_CLIENT_ID` / `VIGILO_CLIENT_SECRET` | via `/setup` | |
+| `PUBLIC_URL` | fra Tailscale | sett ved annen reverse proxy |
+| `LOG_LEVEL` | `INFO` | |
+
+Alt gatewayen lagrer ligger i volumet `/data` (passord, OAuth-klienter og
+-tokens som hasher, Vigilo-nøkler og -tokens, chmod 600). For å logge ut alle
+klienter: stopp gatewayen og slett `/data/oauth.db`.
+
 ## Verktøy
 
 | Verktøy | Gjør |
