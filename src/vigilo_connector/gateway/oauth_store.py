@@ -99,10 +99,12 @@ class OAuthStore:
         return code
 
     def peek_code(self, code: str) -> dict | None:
+        """Les koden uten å bruke den opp. Resultatet har også `expires_at`."""
         rows = self._q(
-            "select data from codes where hash = ? and expires_at > ?", (_hash(code), self._now())
+            "select data, expires_at from codes where hash = ? and expires_at > ?",
+            (_hash(code), self._now()),
         )
-        return json.loads(rows[0][0]) if rows else None
+        return {**json.loads(rows[0][0]), "expires_at": rows[0][1]} if rows else None
 
     def take_code(self, code: str) -> dict | None:
         """Hent og slett koden atomisk — en kode kan bare brukes én gang."""

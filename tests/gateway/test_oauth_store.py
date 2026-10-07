@@ -48,7 +48,7 @@ def test_ventende_authorize_utloper(store, clock):
 
 def test_kode_er_engangs_og_utloper(store, clock):
     code = store.create_code({"client_id": "c1"}, ttl=300)
-    assert store.peek_code(code) == {"client_id": "c1"}
+    assert store.peek_code(code)["client_id"] == "c1"
     assert store.take_code(code) == {"client_id": "c1"}
     assert store.take_code(code) is None
 
