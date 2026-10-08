@@ -143,8 +143,10 @@ passord. Vigilo-innloggingen gjøres på `/setup` i nettleseren.
 ### Krav i tailnettet (én gang)
 
 1. Slå på **HTTPS Certificates** (admin-konsollen → DNS).
-2. Policyen må gi `funnel`-attributtet. Nye tailnets har det for
-   `autogroup:member`; bruker du en tag, legg til f.eks.:
+2. Policyen må gi `funnel`-attributtet til noden. Standardpolicyen gir det bare
+   til `autogroup:member` — **en tagget node (auth key med tag) får det ikke**,
+   og da publiseres adressen aldri i offentlig DNS selv om
+   `tailscale funnel status` sier «Funnel on». Bruker du en tag, legg til:
 
    ```json
    "tagOwners": { "tag:vigilo": ["autogroup:admin"] },
@@ -167,6 +169,12 @@ docker logs vigilo-gateway    # viser adressen og det genererte passordet
 
 Passordet vises bare første gang. Senere:
 `docker exec vigilo-gateway vigilo-gateway show-password`.
+
+Gatewayen deler nettverk med `vigilo-ts`. Starter du `vigilo-ts` på nytt, må
+gatewayen lages på nytt etterpå:
+`docker compose -f docker/compose.yml --env-file .env up -d --force-recreate vigilo-gateway`.
+Etter at Funnel er slått på (eller noden har fått `funnel`-attributtet) kan det
+ta noen minutter før adressen finnes i offentlig DNS.
 
 Uten compose, med to `docker run`:
 
