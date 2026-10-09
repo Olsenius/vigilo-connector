@@ -11,6 +11,7 @@ from starlette.testclient import TestClient
 
 from vigilo_connector import config, server
 from vigilo_connector.auth import AuthError
+from vigilo_connector.client import WriteOutcomeUnknown
 from vigilo_connector.gateway import app as gw
 from vigilo_connector.gateway.settings import ConfigError, load_settings
 
@@ -29,6 +30,16 @@ class FakeVigilo:
         if self.fail:
             raise AuthError("Ingen tokens i /data/vigilo/tokens.json — kjør `vigilo-login` først.")
         return [{"childId": "1", "firstName": "Testbarn A", "lastName": "Testetternavn", "organizationalUnitId": "u", "school": "BHG", "group": "A"}]
+
+    def register_student_absence(self, *args):
+        if self.fail:
+            raise WriteOutcomeUnknown("Ukjent resultat: kontroller fravær før et nytt forsøk.")
+        return {"status": "registered", "childId": args[0], "recipients": args[-1]}
+
+    def register_childcare_absence(self, *args):
+        if self.fail:
+            raise WriteOutcomeUnknown("Ukjent resultat: kontroller fravær før et nytt forsøk.")
+        return {"status": "registered", "childId": args[0], "absenceCode": {"id": args[4], "name": "Fri"}}
 
 
 @pytest.fixture
@@ -145,7 +156,9 @@ def test_full_oauth_flyt_og_verktoykall(client):
     session = _mcp_session(client, tok["access_token"])
     tools = _sse_json(_rpc(client, tok["access_token"], "tools/list", {}, id_=2, session=session))
     names = {t["name"] for t in tools["result"]["tools"]}
-    assert "web_list_children" in names and len(names) == 13
+    assert {"web_list_children", "message_contacts", "register_student_absence"} <= names
+    assert {"absence_codes", "register_childcare_absence"} <= names
+    assert len(names) == 17
 
     res = _sse_json(_rpc(client, tok["access_token"], "tools/call",
                          {"name": "web_list_children", "arguments": {}}, id_=3, session=session))
@@ -163,7 +176,7 @@ def test_full_oauth_flyt_og_verktoykall(client):
 def test_api_token_virker(client):
     session = _mcp_session(client, API_TOKEN)
     tools = _sse_json(_rpc(client, API_TOKEN, "tools/list", {}, id_=2, session=session))
-    assert len(tools["result"]["tools"]) == 13
+    assert len(tools["result"]["tools"]) == 17
 
 
 def test_verktoy_uten_vigilo_innlogging_peker_til_setup(client, fake):
@@ -176,10 +189,48 @@ def test_verktoy_uten_vigilo_innlogging_peker_til_setup(client, fake):
     assert f"{PUBLIC}/setup" in text
 
 
+@pytest.mark.parametrize("unknown", [False, True])
+def test_skolefravaer_gjennom_gateway(client, fake, unknown):
+    fake.fail = unknown
+    session = _mcp_session(client, API_TOKEN)
+    result = _sse_json(_rpc(client, API_TOKEN, "tools/call", {
+        "name": "register_student_absence", "arguments": {
+            "child_id": "child", "organizational_unit_id": "school",
+            "from_date": "2026-10-09", "to_date": "2026-10-09",
+            "note": "Syk", "title": "Fravær",
+            "recipients": [{"type": "employee", "externalId": "contact"}],
+        },
+    }, id_=3, session=session))["result"]
+    if unknown:
+        assert result["isError"] is True
+        assert "kontroller fravær" in result["content"][0]["text"]
+    else:
+        assert result.get("isError") is not True
+        assert "registered" in result["content"][0]["text"]
+
+
 def test_feil_host_avvises(client):
     r = client.post("/mcp", headers=dict(MCP_HEADERS, authorization=f"Bearer {API_TOKEN}", host="evil.example"),
                     json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
     assert r.status_code in (400, 421)
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_barnehagefravaer_gjennom_gateway(client, fake, unknown):
+    fake.fail = unknown
+    session = _mcp_session(client, API_TOKEN)
+    result = _sse_json(_rpc(client, API_TOKEN, "tools/call", {
+        "name": "register_childcare_absence", "arguments": {
+            "child_id": "child", "organizational_unit_id": "nursery",
+            "from_date": "2026-12-24", "to_date": "2026-12-25", "absence_code_id": "free",
+        },
+    }, id_=3, session=session))["result"]
+    if unknown:
+        assert result["isError"] is True
+        assert "kontroller fravær" in result["content"][0]["text"]
+    else:
+        assert result.get("isError") is not True
+        assert "Fri" in result["content"][0]["text"]
 
 
 def test_feil_config_dir_stopper_oppstart(tmp_path, monkeypatch):
@@ -234,3 +285,7 @@ def test_verktoyskjema_bevares_gjennom_feilinnpakning(client):
     timetable = next(t for t in tools if t["name"] == "timetable")
     assert set(timetable["inputSchema"]["required"]) == {"child_id", "organizational_unit_id"}
     assert "ISO-uke" in timetable["description"]
+    childcare = next(t for t in tools if t["name"] == "register_childcare_absence")
+    assert set(childcare["inputSchema"]["required"]) == {
+        "child_id", "organizational_unit_id", "from_date", "to_date", "absence_code_id",
+    }

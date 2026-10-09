@@ -7,12 +7,30 @@ MCP-verktøyet `api_get` til å utforske.
 """
 
 import io
+import re
 from datetime import date, timedelta
 
 import httpx
 
 from .auth import AuthError, TokenStore, user_id_from_jwt
 from .config import API_BASE, APP_VERSION, WEB_API_BASE
+
+
+class WriteOutcomeUnknown(RuntimeError):
+    """Skrivekallet kan ha blitt behandlet; ikke send det på nytt automatisk."""
+
+
+def _absence_dates(from_date: str, to_date: str) -> tuple[str, str]:
+    """ISO-dager inkludert begge ender til appens eksklusive datoperiode."""
+    if not all(isinstance(d, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d)
+               for d in (from_date, to_date)):
+        raise ValueError("Datoene må ha format YYYY-MM-DD.")
+    start, end = date.fromisoformat(from_date), date.fromisoformat(to_date)
+    if end < start:
+        raise ValueError("to_date kan ikke være før from_date.")
+    if end == date.max:
+        raise ValueError("to_date må tillate sluttdato dagen etter.")
+    return start.strftime("%d.%m.%Y"), (end + timedelta(days=1)).strftime("%d.%m.%Y")
 
 
 def iso_week(d: date | None = None) -> str:
@@ -106,6 +124,117 @@ class VigiloClient:
         return r.json()
 
     # --- Kjente endepunkter ---------------------------------------------
+
+    def _post_absence(self, path: str, payload: dict) -> None:
+        """Kun et eksplisitt 401-svar gir ett nytt skriveforsøk."""
+        try:
+            response = self._http.post(path, json=payload, headers=self._headers())
+            if response.status_code == 401:
+                response = self._http.post(path, json=payload, headers=self._headers(force_refresh=True))
+        except httpx.TransportError:
+            raise WriteOutcomeUnknown(
+                "Ukjent resultat: fraværet kan være registrert. Kontroller fraværsoversikten "
+                "før et nytt forsøk; ikke send automatisk på nytt."
+            ) from None
+        if response.status_code == 401:
+            raise AuthError("Fortsatt 401 etter token-fornyelse — kjør `vigilo-login` på nytt.")
+        if response.status_code >= 500:
+            raise WriteOutcomeUnknown(
+                f"Vigilo svarte HTTP {response.status_code}. Fraværet kan være registrert. "
+                "Kontroller fraværsoversikten før et nytt forsøk; ikke send automatisk på nytt."
+            )
+        response.raise_for_status()
+
+    def absence_codes(self, organizational_unit_id: str) -> list:
+        """Aktive fraværskoder for den valgte barnehagen."""
+        if not organizational_unit_id.strip():
+            raise ValueError("organizational_unit_id må være utfylt.")
+        data = self.get_json("/api/absencecodes", params={
+            "organizationalUnitIds": organizational_unit_id,
+        })
+        return [code for item in data["items"]
+                if item["organizationalUnitId"] == organizational_unit_id
+                for code in item.get("codes") or [] if not code.get("isDeleted")]
+
+    def register_childcare_absence(
+        self, child_id: str, organizational_unit_id: str, from_date: str,
+        to_date: str, absence_code_id: str, note: str | None = None,
+    ) -> dict:
+        """Barnehagefravær med enhetens aktive kode og valgfri merknad."""
+        for field, value in (("child_id", child_id), ("organizational_unit_id", organizational_unit_id),
+                             ("absence_code_id", absence_code_id)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field} må være utfylt.")
+        if note is not None and not isinstance(note, str):
+            raise ValueError("note må være tekst eller null.")
+        start, end = _absence_dates(from_date, to_date)
+        selected = next((code for code in self.absence_codes(organizational_unit_id)
+                         if code["id"] == absence_code_id), None)
+        if selected is None:
+            raise ValueError("Velg en aktiv fraværskode fra absence_codes for denne barnehagen.")
+        payload = {
+            "childId": child_id, "organizationalUnitId": organizational_unit_id,
+            "fromDate": start, "toDate": end, "absenceCodeId": absence_code_id,
+        }
+        if note is not None:
+            payload["note"] = note
+        self._post_absence("/api/absences", payload)
+        return {
+            "status": "registered", "childId": child_id,
+            "organizationalUnitId": organizational_unit_id,
+            "fromDate": from_date, "toDate": to_date,
+            "absenceCode": {"id": selected["id"], "name": selected["name"]}, "note": note,
+        }
+
+    def message_contacts(self, child_id: str, organizational_unit_id: str) -> dict:
+        """Kontaktgrupper med eksplisitte mottakerverdier for skrivekall."""
+        data = self.get_json("/api/messages/contact-list", params={
+            "childId": child_id, "organizationalUnitId": organizational_unit_id,
+        })
+        # Bruk kontaktens id, ikke employeeId. Behold grupper og øvrige felt.
+        for key, recipient_type in (
+            ("legalGuardians", "legalGuardian"),
+            ("relatedEmployees", "employee"), ("otherEmployees", "employee"),
+        ):
+            for contact in data.get(key) or []:
+                contact["recipient"] = {"type": recipient_type, "externalId": contact["id"]}
+        for group in data.get("communicationGroups") or []:
+            for contact in group.get("employees") or []:
+                contact["recipient"] = {"type": "employee", "externalId": contact["id"]}
+        return data
+
+    def register_student_absence(
+        self, child_id: str, organizational_unit_id: str, from_date: str,
+        to_date: str, note: str, title: str, recipients: list[dict[str, str]],
+    ) -> dict:
+        """Opprett skolefravær uten vedlegg. Ingen automatisk retry ved transportfeil."""
+        for field, value in (("child_id", child_id), ("organizational_unit_id", organizational_unit_id),
+                             ("note", note), ("title", title)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field} må være utfylt.")
+        start, end = _absence_dates(from_date, to_date)
+        if not recipients:
+            raise ValueError("Velg minst én mottaker fra message_contacts.")
+        selected = []
+        for recipient in recipients:
+            if (set(recipient) != {"type", "externalId"}
+                    or recipient["type"] not in {"employee", "legalGuardian"}
+                    or not isinstance(recipient["externalId"], str)
+                    or not recipient["externalId"].strip()):
+                raise ValueError("Mottakere må ha type employee/legalGuardian og externalId fra kontaktlisten.")
+            selected.append(dict(recipient))
+        payload = {
+            "childId": child_id, "organizationalUnitId": organizational_unit_id,
+            "fromDate": start, "toDate": end,
+            "note": note, "title": title, "attachments": [], "recipients": selected,
+        }
+        self._post_absence("/api/student-absences", payload)
+        return {
+            "status": "registered", "childId": child_id,
+            "organizationalUnitId": organizational_unit_id,
+            "fromDate": from_date, "toDate": to_date, "title": title,
+            "recipients": selected,
+        }
 
     def get_children(self) -> list:
         data = self.get_json("/api/children", params={"userId": self.user_id})

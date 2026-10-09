@@ -52,6 +52,7 @@ def _friendly_errors(fn, setup_url: str):
     from mcp.server.mcpserver.exceptions import ToolError
 
     from ..auth import AuthError
+    from ..client import WriteOutcomeUnknown
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -62,6 +63,8 @@ def _friendly_errors(fn, setup_url: str):
                 f"Vigilo er ikke satt opp, eller innloggingen er utløpt ({e}). "
                 f"Be brukeren logge inn på nytt på {setup_url}"
             ) from None
+        except WriteOutcomeUnknown as e:
+            raise ToolError(str(e)) from None
         except httpx.HTTPStatusError as e:
             raise ToolError(f"Vigilo svarte HTTP {e.response.status_code} på {e.request.url.path}.") from None
         except httpx.TransportError as e:

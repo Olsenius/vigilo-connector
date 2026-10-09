@@ -252,6 +252,10 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `read_post_attachments` | Last ned og les vedlegg i et oppslag/«Siste nytt» (PDF/docx→tekst) — her ligger ofte ukeplanen |
 | `news_feed` | «Siste nytt» / oppslag for et barn |
 | `absences` | Fravær for et barn |
+| `message_contacts` | Kontaktliste for barn/skole med mottakerfeltene `type` og `externalId` |
+| `register_student_absence` | Registrer skolefravær med periode, tittel, begrunnelse og valgte mottakere |
+| `absence_codes` | Aktive fraværskoder for valgt barnehage |
+| `register_childcare_absence` | Registrer barnehagefravær med periode, aktiv kode og valgfri merknad |
 | `consent_forms` | Samtykkeskjemaer (krever `organizationalUnitId`) |
 | `timetable` | Timeplan/ukesplan for en ISO-uke |
 | `scheduling_events` | Prøver/aktiviteter i timeplanen for en uke |
@@ -259,6 +263,32 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 
 `childId` og `organizationalUnitId` får du fra `web_list_children`; begge er
 UUID-er. `week` er ISO-format `YYYY-WW` (default inneværende uke).
+
+Skolefravær tar datoer som `YYYY-MM-DD` (begge dager inkludert).
+Ved sending konverteres siste fraværsdag til eksklusiv sluttdato dagen etter,
+slik appen gjør. Dette ble live-verifisert ved registrering 25.12.2026 (HTTP 201)
+og tilbake-lesing fra fraværsoversikten.
+Hent først `message_contacts` og velg individuelle `recipient`-objekter derfra. Bruk
+kontaktens `id`, ikke `employeeId`; lærere/administrasjon sendes som `employee`,
+foresatte som `legalGuardian`. Skoleverktøyet støtter foreløpig ikke vedlegg eller SFO.
+Tittel, begrunnelse og minst én mottaker kreves lokalt; alle
+backend-valideringsregler er ennå ikke verifisert.
+
+Barnehagefravær bruker `register_childcare_absence`, med samme inkluderte
+ISO-datoperiode. Hent først `absence_codes(organizational_unit_id)` og velg
+kode-ID som svarer til brukerens bestilling, f.eks. Fri. Koden sjekkes mot
+barnehagens aktive koder før sending; slettede koder og koder fra andre enheter
+avvises. Merknad er valgfri, og ingen tittel eller mottakere sendes. Kravene
+til enhet, periode og kode samt sluttdato dagen etter er kontrollert i appens
+`RegisterChildcareAbsenceUseCase`. Flyten er også live-verifisert med fraværskoden Fri over to dager
+(HTTP 201 og tom respons).
+
+Registrering krever at brukeren har bestilt den konkrete handlingen. Ved
+transportfeil er resultatet ukjent: sjekk fraværsoversikten før et nytt forsøk.
+Ingen automatisk retry ved timeout, andre transportfeil eller HTTP 5xx; bare et eksplisitt
+401-svar gir ett nytt forsøk med fornyet token. Suksess kan ha tom respons.
+Kontraktene bygger på Android APK 3.3.0-4, mock-tester og en autorisert
+produksjonsregistrering. Begge verktøy registreres lokalt og i gatewayen.
 
 ## Kartlagte web-endepunkter
 

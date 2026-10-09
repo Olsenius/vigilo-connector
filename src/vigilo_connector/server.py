@@ -153,7 +153,60 @@ def web_api_get(path: str, params_json: str = "{}") -> str:
     return f"HTTP {r.status_code}\n{body[:20000]}"
 
 
+def message_contacts(child_id: str, organizational_unit_id: str) -> str:
+    """Hent kontaktlisten for barn/skole. recipient inneholder type og externalId.
+
+    Velg individuelle mottakere eksplisitt fra listen før registrering av fravær.
+    """
+    return json.dumps(client().message_contacts(child_id, organizational_unit_id),
+                      ensure_ascii=False, indent=2)
+
+
+def register_student_absence(
+    child_id: str, organizational_unit_id: str, from_date: str, to_date: str,
+    note: str, title: str, recipients: list[dict[str, str]],
+) -> str:
+    """Registrer skolefravær når brukeren har bestilt den konkrete registreringen.
+
+    Datoer YYYY-MM-DD, inkludert begge dager. Krever tittel, begrunnelse og
+    eksplisitt valgte recipient-objekter fra message_contacts. Ingen vedlegg.
+    Ved ukjent resultat: kontroller fravær før nytt forsøk, aldri automatisk retry.
+    """
+    return json.dumps(client().register_student_absence(
+        child_id, organizational_unit_id, from_date, to_date, note, title, recipients,
+    ), ensure_ascii=False, indent=2)
+
+
+def absence_codes(organizational_unit_id: str) -> str:
+    """Hent aktive fraværskoder for en barnehage, f.eks. Fri, Ferie og Syk.
+
+    Bruk id fra resultatet som absence_code_id i register_childcare_absence.
+    """
+    return json.dumps(client().absence_codes(organizational_unit_id), ensure_ascii=False, indent=2)
+
+
+def register_childcare_absence(
+    child_id: str, organizational_unit_id: str, from_date: str, to_date: str,
+    absence_code_id: str, note: str | None = None,
+) -> str:
+    """Registrer barnehagefravær når brukeren har bestilt den konkrete handlingen.
+
+    Datoer YYYY-MM-DD, begge dager inkludert. Krever aktiv absence_code_id fra
+    absence_codes for barnets barnehage; note er valgfri. Ingen tittel/mottakere.
+    Kontroller eksisterende fravær før sending for å unngå overlapp. Ved ukjent
+    resultat: kontroller fravær før nytt forsøk, aldri automatisk retry.
+    Bruk register_student_absence for skolefravær.
+    """
+    return json.dumps(client().register_childcare_absence(
+        child_id, organizational_unit_id, from_date, to_date, absence_code_id, note,
+    ), ensure_ascii=False, indent=2)
+
+
 TOOLS = (
+    absence_codes,
+    register_childcare_absence,
+    message_contacts,
+    register_student_absence,
     list_children,
     list_message_threads,
     get_message_thread,
