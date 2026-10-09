@@ -193,6 +193,23 @@ docker run -d --name vigilo-gateway --network container:vigilo-ts --restart unle
   ghcr.io/olsenius/vigilo-connector:latest
 ```
 
+### Bygg og publisering
+
+GitHub Actions kjører tester og bygger images på native AMD64- og ARM64-runnere.
+Begge images røyktestes før publisering til GHCR og samles i ett
+multiarkitektur-manifest. `latest` peker på siste vellykkede bygg fra `main`;
+hver commit får også en `sha-<kort SHA>`-tagg.
+
+Python-baseimaget hentes fra det offentlige Docker Official Images-speilet
+på ECR. Byggingen bruker runnerens innebygde Docker-builder og trenger
+verken QEMU, nedlasting av et separat BuildKit-image eller Docker Hub-innlogging.
+
+Bygg lokalt med:
+
+```bash
+docker build -t vigilo-gateway:local .
+```
+
 ### Logg inn hos Vigilo
 
 Åpne `https://vigilo.<tailnet>.ts.net/setup`, logg inn med passordet og:
