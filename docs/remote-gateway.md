@@ -240,6 +240,13 @@ gatewayen ingen rute inn i resten av tailnettet.
 
 Ingen kall mot ekte Vigilo i CI.
 
+Image-byggingen bruker native AMD64- og ARM64-runnere og deres innebygde
+Docker-builder. Python-baseimaget hentes fra det offentlige Docker Official
+Images-speilet på ECR. Dermed trenger CI verken QEMU, et separat BuildKit-image
+eller Docker Hub-innlogging. Begge arkitekturene røyktestes før de publiseres
+til GHCR; et siste steg samler dem under `latest`, SHA- og eventuelle versjonstagger.
+`PYTHON_IMAGE` kan overstyres som Docker build-argument ved behov.
+
 - `oauth_store`: hashing, utløp, engangskoder, refresh-rotasjon og
   tilbakekalling ved gjenbruk.
 - `settings`: autogenerert passord og session-secret persisteres og gjenbrukes,

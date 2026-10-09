@@ -2,7 +2,7 @@ name: test og docker
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -24,18 +24,27 @@ jobs:
 
   image:
     needs: test
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - name: Logg inn på Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - uses: docker/setup-qemu-action@v3
+      # Native runners and the bundled builder need no QEMU/BuildKit image pulls.
       - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
+      - name: Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/vigilo-connector
 
       - name: Bygg for røyktest
         uses: docker/build-push-action@v6
@@ -43,28 +52,19 @@ jobs:
           context: .
           load: true
           tags: vigilo-gateway:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          labels: ${{ steps.meta.outputs.labels }}
 
       - name: Røyktest
         run: |
+          set -euo pipefail
+          trap 'docker logs smoke; docker rm -f smoke' EXIT
           docker run -d --name smoke --read-only --tmpfs /tmp \
             -e HOST=0.0.0.0 -e PUBLIC_URL=https://vigilo.example -p 8000:8000 vigilo-gateway:ci
           for i in $(seq 1 30); do curl -fs localhost:8000/healthz && break; sleep 1; done
+          curl -fs localhost:8000/healthz
           curl -fs -H 'Host: vigilo.example' localhost:8000/.well-known/oauth-authorization-server
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Host: vigilo.example' localhost:8000/mcp)" = 401
           docker logs smoke 2>&1 | grep -q 'Uvicorn running'
-          docker rm -f smoke
-
-      - name: Metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/vigilo-connector
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-
-            type=semver,pattern={{version}}
 
       - name: Logg inn på GHCR
         if: github.event_name != 'pull_request'
@@ -74,14 +74,51 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Bygg og publiser (amd64 + arm64)
+      - name: Publiser arkitektur-image
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
+        env:
+          REPOSITORY: ${{ github.repository }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${REPOSITORY,,}:${GITHUB_SHA}-${ARCH}"
+          docker tag vigilo-gateway:ci "$image"
+          docker push "$image"
+
+  publish:
+    needs: image
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@v3
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          driver: docker
+      - name: Logg inn på GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/vigilo-connector
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+      - name: Publiser multiarkitektur-manifest
+        env:
+          REPOSITORY: ${{ github.repository }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${REPOSITORY,,}"
+          args=()
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then args+=(--tag "$tag"); fi
+          done <<< "$TAGS"
+          docker buildx imagetools create "${args[@]}" \
+            "${image}:${GITHUB_SHA}-amd64" "${image}:${GITHUB_SHA}-arm64"
+          docker buildx imagetools inspect "${image}:sha-${GITHUB_SHA:0:7}"

@@ -1,11 +1,12 @@
 # Remote MCP-gateway for vigilo-connector. Se docs/remote-gateway.md og README.
-FROM python:3.13-slim AS build
+ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.13-slim
+FROM ${PYTHON_IMAGE} AS build
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 RUN pip wheel --no-cache-dir --wheel-dir /wheels .
 
-FROM python:3.13-slim
+FROM ${PYTHON_IMAGE}
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin vigilo \
     && mkdir -p /data && chown vigilo:vigilo /data
 COPY --from=build /wheels /wheels
