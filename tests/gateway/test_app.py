@@ -26,6 +26,16 @@ class FakeVigilo:
     def __init__(self):
         self.fail = False
 
+    def send_message(self, *args):
+        if self.fail:
+            raise WriteOutcomeUnknown("Meldingen kan være sendt. Kontroller meldingstrådene.")
+        return {"status": "sent", "title": args[2], "recipients": args[4]}
+
+    def reply_message(self, *args):
+        if self.fail:
+            raise WriteOutcomeUnknown("Meldingen kan være sendt. Kontroller meldingstrådene.")
+        return {"status": "sent", "threadUid": args[0]}
+
     def children(self):
         if self.fail:
             raise AuthError("Ingen tokens i /data/vigilo/tokens.json — kjør `vigilo-login` først.")
@@ -158,7 +168,8 @@ def test_full_oauth_flyt_og_verktoykall(client):
     names = {t["name"] for t in tools["result"]["tools"]}
     assert {"web_list_children", "message_contacts", "register_student_absence"} <= names
     assert {"absence_codes", "register_childcare_absence"} <= names
-    assert len(names) == 17
+    assert {"send_message", "reply_message"} <= names
+    assert len(names) == 19
 
     res = _sse_json(_rpc(client, tok["access_token"], "tools/call",
                          {"name": "web_list_children", "arguments": {}}, id_=3, session=session))
@@ -176,7 +187,28 @@ def test_full_oauth_flyt_og_verktoykall(client):
 def test_api_token_virker(client):
     session = _mcp_session(client, API_TOKEN)
     tools = _sse_json(_rpc(client, API_TOKEN, "tools/list", {}, id_=2, session=session))
-    assert len(tools["result"]["tools"]) == 17
+    assert len(tools["result"]["tools"]) == 19
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+@pytest.mark.parametrize("name,args", [
+    ("send_message", {"child_id": "test-child", "organizational_unit_id": "test-school",
+                      "title": "Testtittel", "body": "Testmelding",
+                      "recipients": [{"type": "employee", "externalId": "test-contact"}]}),
+    ("reply_message", {"thread_uid": "test-thread", "body": "Testsvar"}),
+])
+def test_meldinger_gjennom_gateway(client, fake, unknown, name, args):
+    fake.fail = unknown
+    session = _mcp_session(client, API_TOKEN)
+    result = _sse_json(_rpc(client, API_TOKEN, "tools/call", {
+        "name": name, "arguments": args,
+    }, id_=3, session=session))["result"]
+    if unknown:
+        assert result["isError"] is True
+        assert "kan være sendt" in result["content"][0]["text"]
+    else:
+        assert result.get("isError") is not True
+        assert json.loads(result["content"][0]["text"])["status"] == "sent"
 
 
 def test_verktoy_uten_vigilo_innlogging_peker_til_setup(client, fake):

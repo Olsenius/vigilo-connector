@@ -9,11 +9,13 @@ MCP-verktøyet `api_get` til å utforske.
 import io
 import re
 from datetime import date, timedelta
+from urllib.parse import quote
 
 import httpx
 
 from .auth import AuthError, TokenStore, user_id_from_jwt
 from .config import API_BASE, APP_VERSION, WEB_API_BASE
+from .transport import JSON_CONTENT_TYPE, android_client, android_json, is_filestorage
 
 
 class WriteOutcomeUnknown(RuntimeError):
@@ -75,7 +77,7 @@ def _attachment_to_text(data: bytes, mime: str, name: str | None) -> str | None:
 class VigiloClient:
     def __init__(self, store: TokenStore | None = None):
         self._store = store or TokenStore()
-        self._http = httpx.Client(base_url=API_BASE, timeout=30)
+        self._http = android_client(API_BASE, app_api=True)
         self._web = httpx.Client(base_url=WEB_API_BASE, timeout=30)
 
     def _headers(self, force_refresh: bool = False) -> dict:
@@ -94,6 +96,9 @@ class VigiloClient:
 
     def get(self, path: str, params: dict | None = None) -> httpx.Response:
         """Rått GET-kall med auth og retry ved 401. Brukes også til kartlegging."""
+        if is_filestorage(path):
+            # Android hopper over auth/session helt for filestorage-stier.
+            return self._http.get(path, params=params)
         r = self._http.get(path, params=params, headers=self._headers())
         if r.status_code == 401:
             r = self._http.get(path, params=params, headers=self._headers(force_refresh=True))
@@ -125,12 +130,19 @@ class VigiloClient:
 
     # --- Kjente endepunkter ---------------------------------------------
 
+    def _post_json(self, path: str, payload: dict, force_refresh: bool = False) -> httpx.Response:
+        return self._http.post(
+            path, content=android_json(payload),
+            headers={**self._headers(force_refresh), "Content-Type": JSON_CONTENT_TYPE},
+            follow_redirects=False,
+        )
+
     def _post_absence(self, path: str, payload: dict) -> None:
         """Kun et eksplisitt 401-svar gir ett nytt skriveforsøk."""
         try:
-            response = self._http.post(path, json=payload, headers=self._headers())
+            response = self._post_json(path, payload)
             if response.status_code == 401:
-                response = self._http.post(path, json=payload, headers=self._headers(force_refresh=True))
+                response = self._post_json(path, payload, force_refresh=True)
         except httpx.TransportError:
             raise WriteOutcomeUnknown(
                 "Ukjent resultat: fraværet kan være registrert. Kontroller fraværsoversikten "
@@ -237,8 +249,75 @@ class VigiloClient:
         }
 
     def get_children(self) -> list:
-        data = self.get_json("/api/children", params={"userId": self.user_id})
+        data = self.get_json("/api/children")
         return data if isinstance(data, list) else data.get("items", [])
+
+    def _post_message(self, path: str, payload: dict) -> None:
+        """Send én gang; kun eksplisitt 401 tillater tokenfornyelse og retry."""
+        try:
+            response = self._post_json(path, payload)
+            if response.status_code == 401:
+                response = self._post_json(path, payload, force_refresh=True)
+        except httpx.TransportError:
+            raise WriteOutcomeUnknown(
+                "Ukjent resultat: meldingen kan være sendt. Kontroller meldingstrådene "
+                "før et nytt forsøk; ikke send automatisk på nytt."
+            ) from None
+        if response.status_code == 401:
+            raise AuthError("Fortsatt 401 etter token-fornyelse — kjør `vigilo-login` på nytt.")
+        if response.status_code >= 500:
+            raise WriteOutcomeUnknown(
+                f"Vigilo svarte HTTP {response.status_code}. Meldingen kan være sendt. "
+                "Kontroller meldingstrådene før et nytt forsøk; ikke send automatisk på nytt."
+            )
+        response.raise_for_status()
+
+    def send_message(
+        self, child_id: str, organizational_unit_id: str, title: str, body: str,
+        recipients: list[dict[str, str]],
+    ) -> dict:
+        """Ny melding uten vedlegg, til eksplisitte kontakter fra valgt barn/enhet."""
+        for field, value in (("child_id", child_id), ("organizational_unit_id", organizational_unit_id),
+                             ("title", title), ("body", body)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field} må være utfylt.")
+        if not isinstance(recipients, list) or not recipients:
+            raise ValueError("Velg mottakere fra message_contacts, inkludert minst én ansatt.")
+        selected = []
+        for recipient in recipients:
+            if (not isinstance(recipient, dict) or set(recipient) != {"type", "externalId"}
+                    or recipient["type"] not in ("employee", "legalGuardian")
+                    or not isinstance(recipient["externalId"], str)
+                    or not recipient["externalId"].strip()):
+                raise ValueError("Mottakere må ha type employee/legalGuardian og externalId fra kontaktlisten.")
+            if recipient not in selected:
+                selected.append(dict(recipient))
+        if not any(r["type"] == "employee" for r in selected):
+            raise ValueError("Minst én lærer/administrasjon må være mottaker.")
+        contacts = self.message_contacts(child_id, organizational_unit_id)
+        allowed = [c["recipient"] for key in ("relatedEmployees", "otherEmployees", "legalGuardians")
+                   for c in contacts.get(key) or []]
+        allowed.extend(c["recipient"] for g in contacts.get("communicationGroups") or []
+                       for c in g.get("employees") or [])
+        if any(r not in allowed for r in selected):
+            raise ValueError("Velg mottakere fra kontaktlisten for dette barnet og denne enheten.")
+        self._post_message("/api/messages", {
+            "organizationalUnitId": organizational_unit_id, "title": title, "body": body,
+            "attachments": [], "recipients": selected,
+        })
+        return {"status": "sent", "childId": child_id, "title": title, "recipients": selected}
+
+    def reply_message(self, thread_uid: str, body: str) -> dict:
+        """Svar i en eksisterende ordinær meldingstråd uten vedlegg."""
+        for field, value in (("thread_uid", thread_uid), ("body", body)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field} må være utfylt.")
+        if thread_uid in (".", ".."):
+            raise ValueError("Ugyldig thread_uid.")
+        self._post_message(f"/api/messages/{quote(thread_uid, safe='')}/reply", {
+            "body": body, "attachments": [],
+        })
+        return {"status": "sent", "threadUid": thread_uid}
 
     def get_message_threads(
         self, child_id: str, page_size: int = 50, include_after_school: bool = True
@@ -246,7 +325,6 @@ class VigiloClient:
         data = self.get_json(
             "/api/message-threads",
             params={
-                "userId": self.user_id,
                 "childIds": child_id,
                 "pageSize": page_size,
                 "unreadMessageThreadsCountOnly": "false",
@@ -258,7 +336,7 @@ class VigiloClient:
     def get_thread(self, thread_uid: str, page_size: int = 50) -> dict:
         return self.get_json(
             f"/api/messages/threads/{thread_uid}",
-            params={"userId": self.user_id, "pageSize": page_size},
+            params={"pageSize": page_size},
         )
 
     # --- Web-foreldreportal ---------------------------------------------

@@ -7,6 +7,7 @@ from vigilo_connector.auth import AuthError
 from vigilo_connector.client import VigiloClient, WriteOutcomeUnknown
 from vigilo_connector.config import API_BASE, APP_VERSION
 from vigilo_connector import server
+from vigilo_connector.transport import android_client
 
 
 class FakeStore:
@@ -27,7 +28,7 @@ def client():
 
 def transport(client, handler):
     client._http.close()
-    client._http = httpx.Client(base_url=API_BASE, transport=httpx.MockTransport(handler))
+    client._http = android_client(API_BASE, app_api=True, transport=httpx.MockTransport(handler))
 
 
 def register(client, **changes):

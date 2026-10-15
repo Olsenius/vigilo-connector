@@ -73,11 +73,10 @@ def api_get(path: str, params_json: str = "{}") -> str:
     """Rått GET mot foreldre-API-et — for kartlegging av nye endepunkter.
 
     path: f.eks. "/api/children". params_json: query-parametre som JSON-objekt;
-    userId legges til automatisk om den ikke er satt. Returnerer status og body
+    userId-query fjernes før sending, slik Android-appen gjør. Returnerer status og body
     uansett utfall, så 404/400 også gir informasjon.
     """
     params = json.loads(params_json)
-    params.setdefault("userId", client().user_id)
     r = client().get(path, params=params)
     body = r.text
     try:
@@ -156,10 +155,32 @@ def web_api_get(path: str, params_json: str = "{}") -> str:
 def message_contacts(child_id: str, organizational_unit_id: str) -> str:
     """Hent kontaktlisten for barn/skole. recipient inneholder type og externalId.
 
-    Velg individuelle mottakere eksplisitt fra listen før registrering av fravær.
+    Velg individuelle mottakere eksplisitt før meldingssending eller skolefravær.
     """
     return json.dumps(client().message_contacts(child_id, organizational_unit_id),
                       ensure_ascii=False, indent=2)
+
+
+def send_message(
+    child_id: str, organizational_unit_id: str, title: str, body: str,
+    recipients: list[dict[str, str]],
+) -> str:
+    """Send ny melding når brukeren har bestilt konkret innhold og mottakere.
+
+    Hent message_contacts først. Minst én ansatt kreves; foresatte kan inkluderes.
+    Ingen vedlegg. Ved ukjent resultat: sjekk meldingstrådene før nytt forsøk.
+    """
+    return json.dumps(client().send_message(
+        child_id, organizational_unit_id, title, body, recipients,
+    ), ensure_ascii=False, indent=2)
+
+
+def reply_message(thread_uid: str, body: str) -> str:
+    """Send bestilt svar i en ordinær meldingstråd fra get_message_thread.
+
+    Ingen vedlegg eller fraværstråder. Ved ukjent resultat: les tråden før nytt forsøk.
+    """
+    return json.dumps(client().reply_message(thread_uid, body), ensure_ascii=False, indent=2)
 
 
 def register_student_absence(
@@ -203,6 +224,8 @@ def register_childcare_absence(
 
 
 TOOLS = (
+    send_message,
+    reply_message,
     absence_codes,
     register_childcare_absence,
     message_contacts,

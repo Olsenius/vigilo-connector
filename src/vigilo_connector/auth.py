@@ -1,6 +1,6 @@
 """OAuth2 mot Vigilos auth-server.
 
-Flyten er authorization code + PKCE mot appens registrerte client. Redirecten
+Flyten er authorization code uten PKCE mot appens registrerte client. Redirecten
 går til et custom app-scheme som nettlesere ikke kan følge, så koden må
 copy-pastes fra den feilede adressen (se README og `login.py`).
 
@@ -18,9 +18,10 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import httpx
 
 from .config import AUTH_BASE, REDIRECT_URI, SCOPE, TOKEN_FILE, load_client_credentials, write_json_atomic
+from .transport import android_client
 
 # Forny access-token når det er mindre enn dette igjen av levetiden.
-EXPIRY_MARGIN = 60
+EXPIRY_MARGIN = 15
 
 
 class AuthError(RuntimeError):
@@ -59,12 +60,11 @@ def authorize_url(state: str) -> str:
 
 
 def _token_request(data: dict) -> dict:
-    r = httpx.post(
-        f"{AUTH_BASE}/connect/token",
-        headers={"Authorization": f"Basic {_basic_auth()}"},
-        data=data,
-        timeout=30,
-    )
+    with android_client(AUTH_BASE) as client:
+        r = client.post(
+            "/connect/token", headers={"Authorization": f"Basic {_basic_auth()}"},
+            data=data, follow_redirects=False,
+        )
     if r.status_code in (400, 401):
         raise AuthError(f"Token-kall avvist ({r.status_code}): {r.text[:300]}")
     r.raise_for_status()

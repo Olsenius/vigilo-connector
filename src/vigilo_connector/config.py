@@ -17,7 +17,7 @@ API_BASE = "https://api-gw-parent-app.prod.vigilo-oas.no"
 # her; må bekreftes mot et ekte token. Dekker timeplan/fravær/samtykke/vurdering
 # som ikke finnes i app-gatewayen.
 WEB_API_BASE = "https://web-parent.prod.vigilo-oas.no"
-APP_VERSION = "Android 3.1.4-15"
+APP_VERSION = "Android 3.3.0-4"
 REDIRECT_URI = os.environ.get("VIGILO_REDIRECT_URI", "app://ch-parent-android.vigilo.no")
 SCOPE = "openid vigiloprofile offline_access"
 

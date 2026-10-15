@@ -3,6 +3,8 @@ from mcp.server.mcpserver import MCPServer
 from vigilo_connector import server
 
 EXPECTED = {
+    "send_message",
+    "reply_message",
     "absence_codes",
     "register_childcare_absence",
     "message_contacts",

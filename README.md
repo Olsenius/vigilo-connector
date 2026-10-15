@@ -270,6 +270,8 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `news_feed` | «Siste nytt» / oppslag for et barn |
 | `absences` | Fravær for et barn |
 | `message_contacts` | Kontaktliste for barn/skole med mottakerfeltene `type` og `externalId` |
+| `send_message` | Send ny melding med tittel, tekst og eksplisitt valgte mottakere |
+| `reply_message` | Send svar i en eksisterende ordinær meldingstråd |
 | `register_student_absence` | Registrer skolefravær med periode, tittel, begrunnelse og valgte mottakere |
 | `absence_codes` | Aktive fraværskoder for valgt barnehage |
 | `register_childcare_absence` | Registrer barnehagefravær med periode, aktiv kode og valgfri merknad |
@@ -280,6 +282,18 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 
 `childId` og `organizationalUnitId` får du fra `web_list_children`; begge er
 UUID-er. `week` er ISO-format `YYYY-WW` (default inneværende uke).
+
+Meldingssending krever at brukeren har bestilt konkret innhold og mottakere.
+`send_message` tar `child_id`, `organizational_unit_id`, `title`, `body` og
+`recipients` fra `message_contacts`. Mottakere sjekkes mot barnets kontaktliste,
+og minst én lærer/administrasjon (`employee`) kreves. `reply_message` tar
+`thread_uid` fra en ordinær meldingstråd og `body`; fraværstråder støttes ikke.
+Begge sender uten vedlegg. Ved timeout eller HTTP 5xx kan meldingen være sendt:
+les meldingstrådene før et nytt forsøk. Bare eksplisitt HTTP 401 gir ett nytt
+forsøk med fornyet token. Begge verktøy er kontrakttestet med mock-transport.
+Svar i en eksisterende tråd er også live-verifisert gjennom gatewayen, med
+tilbake-lesing som bekreftet den sendte teksten. Oppretting av en ny meldingstråd
+er foreløpig kun kontrakttestet.
 
 Skolefravær tar datoer som `YYYY-MM-DD` (begge dager inkludert).
 Ved sending konverteres siste fraværsdag til eksklusiv sluttdato dagen etter,
@@ -306,6 +320,28 @@ Ingen automatisk retry ved timeout, andre transportfeil eller HTTP 5xx; bare et 
 401-svar gir ett nytt forsøk med fornyet token. Suksess kan ha tom respons.
 Kontraktene bygger på Android APK 3.3.0-4, mock-tester og en autorisert
 produksjonsregistrering. Begge verktøy registreres lokalt og i gatewayen.
+
+## Android-transport
+
+App-API-et etterligner transporten observert i Android APK 3.3.0-4:
+`appVersion: Android 3.3.0-4`, `User-Agent: okhttp/4.10.0`, gzip og
+`Content-Type: application/json; charset=UTF-8` på JSON-kall. HTTP/2 tilbys med
+HTTP/1.1-fallback. JSON bruker kompakt UTF-8 og Gsons standard escaping.
+`userId` i query er en lokal Android-sesjonsmarkør og fjernes før sending;
+ID-er i URL-stier beholdes. Ingen cookies persisteres i app-/OAuth-klienten.
+App-/OAuth-klientene har 100 s connect/read-timeout og 10 s write/pool-timeout.
+Token fornyes når mindre enn 15 sekunder gjenstår. OAuth-tokenkall bruker Basic
+auth og form-urlencoded uten appVersion. Browser-login, web-API-et og eksterne
+vedlegg bruker sine separate oppsett. `filestorage`-stier hopper over Bearer,
+appVersion og token-refresh, slik appens interceptor gjør.
+
+Meldinger trenger ingen ekstra `X-*`-header i den undersøkte kontrakten.
+Enkelte hente-/leveringsbeskjeder bruker `X-Organizational-Unit-Id`, og tenant-logo
+bruker `X-Tenant-Id`; disse settes ikke globalt. Skrivekall følger ikke redirects
+eller automatiske transport-retries. HTTP 401 tillater ett eksplisitt nytt forsøk
+med fornyet token. TLS-fingeravtrykk og Androids cache/retry-implementasjon er
+forskjellige; dette er kompatibilitet med observerte kontrakter, ikke garantert
+identisk nettverkstrafikk.
 
 ## Kartlagte web-endepunkter
 
