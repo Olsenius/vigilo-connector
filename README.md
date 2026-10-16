@@ -279,6 +279,7 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `register_childcare_absence` | Registrer barnehagefravær med periode, aktiv kode og valgfri merknad |
 | `list_pickup_notes` | Hentemeldinger (SFO) for et barn i én kalendermåned, med barnets SFO-enheter |
 | `pickup_note_options` | Aktiverte kategorier, meldingstyper og registreringsfrister for en SFO-enhet |
+| `create_pickup_note` | Opprett hentemelding (SFO) for én periode, valgfritt ukentlig gjentatt |
 | `consent_forms` | Samtykkeskjemaer (krever `organizationalUnitId`) |
 | `timetable` | Timeplan/ukesplan for en ISO-uke |
 | `scheduling_events` | Prøver/aktiviteter i timeplanen for en uke |
@@ -403,9 +404,9 @@ de fire eksisterende skriveoperasjonene beholder ett forsøk etter eksplisitt
 nytt etter transportfeil, 3xx eller 5xx; utfallet regnes da som ukjent.
 Feilmeldinger viser HTTP-status og et
 formatbegrenset `X-Correlation-Id` når tilgjengelig, aldri responsinnhold.
-Nye brukerrettede skrivehandlinger utover de fire eksisterende er ikke lagt til.
+`create_pickup_note` er den femte skrivehandlingen og har samme 401-forsøk.
 
-Hentemeldinger leses bare; oppretting, endring og sletting er ikke støttet ennå.
+Hentemeldinger kan leses og opprettes; endring og sletting er ikke støttet ennå.
 Som i appen vises de bare for barn med en SFO-enhet (`type: afterSchool` i
 app-gatewayens barneliste); uten SFO-enhet gjøres ikke noe kall mot
 `/api/check-in-notes`. `list_pickup_notes(child_id, month)` henter én
@@ -428,6 +429,23 @@ markeres den sist endrede (`lastUpdatedTime`) med `active: true` og
 `typeAbbreviation`, appens kode: forbokstavene i de tre første ordene i
 typenavnet, eller de tre første tegnene når navnet er ett ord. Appens kalender
 viser bare hverdager. Lesingen er live-verifisert mot appens visning.
+
+`create_pickup_note` sender `POST /api/check-in-notes` med
+`X-Organizational-Unit-Id` og samme body som appen: `childPersonIds`, typens
+`category`, `typeId`, `fromDate` og eksklusiv `toDate` som `YYYY-MM-DD`,
+`timeOfDay` som `HH:MM:SS` og `noteText` (tom når den mangler). Uten
+`repeat_days` er mønsteret `daily` med intervall 1 og uten `daysOfWeek` (Gson
+utelater null). Med `repeat_days` (mandag–fredag, som appen tilbyr) er det
+`weekly` med intervall 1, eller 2 med `every_other_week`. Før sending avvises
+lokalt: enhet som ikke er barnets SFO, type som er inaktiv, slettet eller har
+deaktivert kategori, manglende tekst når typen har `useComment`, tid utenfor
+appens timehjul (kvarter fra 06:00 til 18:00) og startdato før
+`earliestAllowedDate` (UTC til Oslo-tid, helg flyttet til mandag som i appen).
+Vigilos valideringskoder (`type`, `validationErrors[*].errorCode`) vises uten
+servertekst. Hva klokkeslettet betyr avhenger av typen; for «Bestemmer selv
+sluttid» er det tidligste sluttid. Enkeltdager er live-verifisert 16.10.2026
+(HTTP 204, tilbake-lesing med `list_pickup_notes`); gjentakelse er ikke
+live-testet.
 
 Skolefravær tar datoer som `YYYY-MM-DD` (begge dager inkludert).
 Ved sending konverteres siste fraværsdag til eksklusiv sluttdato dagen etter,

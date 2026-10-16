@@ -168,6 +168,27 @@ def pickup_note_options(child_id: str, organizational_unit_id: str) -> str:
                  ensure_ascii=False, indent=2)
 
 
+def create_pickup_note(
+    child_id: str, organizational_unit_id: str, type_id: str, from_date: str,
+    to_date: str, time_of_day: str, note_text: str | None = None,
+    repeat_days: list[str] | None = None, every_other_week: bool = False,
+) -> str:
+    """Opprett ei hentemelding (SFO) når brukaren har bestilt den konkrete handlinga.
+
+    Sjekk først eksisterande meldingar med list_pickup_notes og vel type_id frå
+    pickup_note_options (aktiv type med categoryEnabled). Datoar YYYY-MM-DD, begge
+    dagar inkludert. time_of_day "HH:MM" i kvarter mellom 06:00 og 18:00.
+    note_text er påkravd når typen har useComment=true. repeat_days (monday–friday)
+    gir vekentleg gjentaking i perioden; every_other_week=true gir annakvar veke.
+    Utan repeat_days gjeld meldinga kvar dag i perioden. Ved ukjent resultat:
+    kontroller list_pickup_notes før nytt forsøk, aldri automatisk retry.
+    """
+    return _json(client().create_pickup_note(
+        child_id, organizational_unit_id, type_id, from_date, to_date, time_of_day,
+        note_text, repeat_days, every_other_week,
+    ), ensure_ascii=False, indent=2)
+
+
 def read_message_attachments(thread_uid: str) -> str:
     """Last ned og les vedleggene i en meldingstråd (f.eks. ukeplan-PDF).
 
@@ -358,6 +379,7 @@ TOOLS = (
     get_message_thread,
     list_pickup_notes,
     pickup_note_options,
+    create_pickup_note,
     read_message_attachments,
     read_post_attachments,
     api_get,

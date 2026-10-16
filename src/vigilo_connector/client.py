@@ -693,14 +693,17 @@ class VigiloClient:
         result["notes"] = items
         return result
 
-    def pickup_note_options(self, child_id: str, organizational_unit_id: str) -> dict:
-        """Aktiverte kategoriar, meldingstypar og registreringsfristar for ei SFO-eining."""
+    def _require_after_school_unit(self, child_id: str, organizational_unit_id: str) -> None:
         if not isinstance(organizational_unit_id, str) or not organizational_unit_id.strip():
             raise ValueError("organizational_unit_id må vere utfylt.")
         if not any(unit.get("id") == organizational_unit_id
                    for unit in self._after_school_units(child_id)):
             raise ValueError("organizational_unit_id må vere ei SFO-eining for barnet; "
                              "sjå afterSchoolUnits i list_pickup_notes.")
+
+    def pickup_note_options(self, child_id: str, organizational_unit_id: str) -> dict:
+        """Aktiverte kategoriar, meldingstypar og registreringsfristar for ei SFO-eining."""
+        self._require_after_school_unit(child_id, organizational_unit_id)
         config = self.get_json("/api/check-in-note-configuration",
                                headers={"X-Organizational-Unit-Id": organizational_unit_id})
         categories = config.get("enabledCategories") if isinstance(config, dict) else None
@@ -723,6 +726,132 @@ class VigiloClient:
                 }) for category in categories
             ],
         }
+
+    PICKUP_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday")
+
+    @staticmethod
+    def _pickup_earliest_date(deadline) -> date | None:
+        """Tidlegaste dato som i appen: UTC til Oslo-tid, helg flytta til måndag.
+
+        Manglar eller ugyldig verdi gir ingen lokal grense; serveren avgjer då.
+        """
+        value = deadline.get("earliestAllowedDate") if isinstance(deadline, dict) else None
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            moment = datetime.fromisoformat(value.replace("Z", "")[:19])
+        except ValueError:
+            return None
+        local = moment.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Oslo")).date()
+        return local + timedelta(days={5: 2, 6: 1}.get(local.weekday(), 0))
+
+    def create_pickup_note(
+        self, child_id: str, organizational_unit_id: str, type_id: str,
+        from_date: str, to_date: str, time_of_day: str, note_text: str | None = None,
+        repeat_days: list[str] | None = None, every_other_week: bool = False,
+    ) -> dict:
+        """Opprett éi hentemelding (POST /api/check-in-notes) som appen gjer det.
+
+        Datoar YYYY-MM-DD med begge dagar inkludert; tid HH:MM i kvarter mellom
+        06:00 og 18:00. Utan repeat_days gjeld meldinga kvar dag i perioden.
+        """
+        for field, value in (("child_id", child_id), ("type_id", type_id)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field} må vere utfylt.")
+        if not all(isinstance(d, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d)
+                   for d in (from_date, to_date)):
+            raise ValueError("Datoane må ha format YYYY-MM-DD.")
+        try:
+            start, end = date.fromisoformat(from_date), date.fromisoformat(to_date)
+        except ValueError:
+            raise ValueError("Datoane må vere gyldige datoar på format YYYY-MM-DD.") from None
+        if end < start:
+            raise ValueError("to_date kan ikkje vere før from_date.")
+        if end == date.max:
+            raise ValueError("to_date må tillate sluttdato dagen etter.")
+        if not isinstance(time_of_day, str) or not re.fullmatch(r"\d{2}:\d{2}", time_of_day):
+            raise ValueError("time_of_day må ha format HH:MM.")
+        hour, minute = int(time_of_day[:2]), int(time_of_day[3:])
+        # Appens timehjul: 06–18 i kvarter, 18:00 er siste val.
+        if minute not in (0, 15, 30, 45) or not (6 <= hour < 18 or (hour, minute) == (18, 0)):
+            raise ValueError("time_of_day må vere eit kvarter mellom 06:00 og 18:00.")
+        if note_text is not None and not isinstance(note_text, str):
+            raise ValueError("note_text må vere tekst eller null.")
+        if type(every_other_week) is not bool:
+            raise ValueError("every_other_week må vere true eller false.")
+        if repeat_days is not None:
+            if (not isinstance(repeat_days, list) or not repeat_days
+                    or any(d not in self.PICKUP_WEEKDAYS for d in repeat_days)):
+                raise ValueError("repeat_days må vere minst éin av " + ", ".join(self.PICKUP_WEEKDAYS) + ".")
+            repeat_days = [d for d in self.PICKUP_WEEKDAYS if d in repeat_days]
+        elif every_other_week:
+            raise ValueError("every_other_week krev repeat_days.")
+
+        options = self.pickup_note_options(child_id, organizational_unit_id)
+        selected = next((t for t in options["types"] if t.get("id") == type_id), None)
+        if (selected is None or selected.get("isActive") is not True
+                or selected.get("isDeleted") is True or not selected["categoryEnabled"]
+                or not isinstance(selected.get("category"), str)):
+            raise ValueError("Vel ein aktiv type med aktivert kategori frå pickup_note_options.")
+        category = selected["category"]
+        if selected.get("useComment") is True and not (note_text or "").strip():
+            raise ValueError("Denne typen krev tekst i note_text.")
+        deadline = next((d for d in options["registrationDeadlines"]
+                         if isinstance(d, dict) and d.get("noteCategory") == category), None)
+        earliest = self._pickup_earliest_date(deadline)
+        if earliest is not None and start < earliest:
+            raise ValueError(f"Registreringsfristen er passert; tidlegaste dato er {earliest.isoformat()}.")
+
+        # Gson utelèt null-felt, så daysOfWeek manglar utan gjentaking.
+        recurrence = {"recurrenceType": "weekly" if repeat_days else "daily",
+                      "interval": 2 if repeat_days and every_other_week else 1}
+        if repeat_days:
+            recurrence["daysOfWeek"] = repeat_days
+        payload = {
+            "childPersonIds": [child_id], "category": category, "typeId": type_id,
+            "fromDate": start.isoformat(), "toDate": (end + timedelta(days=1)).isoformat(),
+            "recurrencePattern": recurrence, "timeOfDay": f"{time_of_day}:00",
+            "noteText": note_text or "",
+        }
+        try:
+            self._write_json(
+                "POST", "/api/check-in-notes", payload, retry_401=True,
+                headers={"X-Organizational-Unit-Id": organizational_unit_id},
+                outcome="Hentemeldinga kan vere oppretta. Kontroller list_pickup_notes",
+            )
+        except httpx.HTTPStatusError as error:
+            codes = self._validation_codes(error.response)
+            if not codes:
+                raise
+            if "registration_deadline_has_passed_for_date" in codes:
+                raise ValueError("Vigilo avviste: registreringsfristen er passert for datoen. "
+                                 "Sjå registrationDeadlines i pickup_note_options.") from None
+            raise ValueError("Vigilo avviste hentemeldinga: " + ", ".join(codes) + ".") from None
+        return {
+            "status": "created", "childId": child_id,
+            "organizationalUnitId": organizational_unit_id,
+            "type": {"id": type_id, "name": selected.get("name"), "category": category},
+            "fromDate": from_date, "toDate": to_date, "timeOfDay": time_of_day,
+            "repeatDays": repeat_days, "everyOtherWeek": bool(repeat_days and every_other_week),
+            "noteText": note_text or "",
+            "verify": f"Kontroller med list_pickup_notes for {from_date[:7]}.",
+        }
+
+    @staticmethod
+    def _validation_codes(response: httpx.Response) -> list[str]:
+        """Kodane i Vigilos ValidationError-svar (type og validationErrors[*].errorCode)."""
+        try:
+            body = response.json()
+        except ValueError:
+            return []
+        if not isinstance(body, dict):
+            return []
+        codes = [body["type"]] if isinstance(body.get("type"), str) else []
+        details = body.get("validationErrors")
+        if isinstance(details, dict):
+            codes += [d["errorCode"] for d in details.values()
+                      if isinstance(d, dict) and isinstance(d.get("errorCode"), str)]
+        return [c for c in codes if re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", c)]
 
     # --- Web-foreldreportal ---------------------------------------------
     # Endepunkter kartlagt fra web-portalen (web-parent.prod.vigilo-oas.no),
