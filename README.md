@@ -280,6 +280,9 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `list_pickup_notes` | Hentemeldinger (SFO) for et barn i én kalendermåned, med barnets SFO-enheter |
 | `pickup_note_options` | Aktiverte kategorier, meldingstyper og registreringsfrister for en SFO-enhet |
 | `create_pickup_note` | Opprett hentemelding (SFO) for én periode, valgfritt ukentlig gjentatt |
+| `update_pickup_note` | Endre hele hentemeldingen/serien (SFO); utelatte felt beholdes |
+| `set_pickup_note_end_date` | Ny siste dag for en hentemelding/serie (SFO) |
+| `delete_pickup_note` | Slett hele hentemeldingen/serien (SFO) |
 | `consent_forms` | Samtykkeskjemaer (krever `organizationalUnitId`) |
 | `timetable` | Timeplan/ukesplan for en ISO-uke |
 | `scheduling_events` | Prøver/aktiviteter i timeplanen for en uke |
@@ -404,9 +407,10 @@ de fire eksisterende skriveoperasjonene beholder ett forsøk etter eksplisitt
 nytt etter transportfeil, 3xx eller 5xx; utfallet regnes da som ukjent.
 Feilmeldinger viser HTTP-status og et
 formatbegrenset `X-Correlation-Id` når tilgjengelig, aldri responsinnhold.
-`create_pickup_note` er den femte skrivehandlingen og har samme 401-forsøk.
+`create_pickup_note`, `update_pickup_note`, `set_pickup_note_end_date` og
+`delete_pickup_note` har samme 401-forsøk.
 
-Hentemeldinger kan leses og opprettes; endring og sletting er ikke støttet ennå.
+Hentemeldinger kan leses, opprettes, endres og slettes.
 Som i appen vises de bare for barn med en SFO-enhet (`type: afterSchool` i
 app-gatewayens barneliste); uten SFO-enhet gjøres ikke noe kall mot
 `/api/check-in-notes`. `list_pickup_notes(child_id, month)` henter én
@@ -444,8 +448,35 @@ appens timehjul (kvarter fra 06:00 til 18:00) og startdato før
 Vigilos valideringskoder (`type`, `validationErrors[*].errorCode`) vises uten
 servertekst. Hva klokkeslettet betyr avhenger av typen; for «Bestemmer selv
 sluttid» er det tidligste sluttid. Enkeltdager er live-verifisert 16.10.2026
-(HTTP 204, tilbake-lesing med `list_pickup_notes`); gjentakelse er ikke
-live-testet.
+(HTTP 204, tilbake-lesing med `list_pickup_notes`), og ukentlig gjentakelse
+likeså (`weekly`, intervall 1, `daysOfWeek` lest tilbake som sendt).
+
+Endring følger appen: det finnes ingen endring av én enkelt dag, bare av hele
+meldingen/serien. Verktøyene tar `note_id` og en `month` (`YYYY-MM`) der
+meldingen vises i `list_pickup_notes`, fordi appen ikke har oppslag av én
+melding. Meldingens egen SFO-enhet brukes i `X-Organizational-Unit-Id`, og
+Vigilos flagg avgjør hva som er lov, som i appens liste: `canUpdate` gir
+`update_pickup_note`, bare `canUpdateToDate` gir `set_pickup_note_end_date`,
+og `canDelete` gir `delete_pickup_note`.
+
+`update_pickup_note` sender `PUT /api/check-in-notes/{id}` med samme body som
+oppretting, men uten `childPersonIds` (appens
+`UpdateCheckoutNoteRequestApiModel`). Utelatte felt hentes fra meldingen;
+`repeat_days=[]` slår av gjentakelse. Fristen sjekkes bare når startdatoen
+endres. En ukentlig serie uten `daysOfWeek` avvises lokalt: Vigilo lagrer den,
+men den gjelder da bare startdagen (observert live 16.10.2026 etter endring i
+appen). Live-verifisert 16.10.2026: PUT med `daysOfWeek` ga HTTP 204, og
+tilbake-lesing viste dagene og alle forekomstene.
+
+`set_pickup_note_end_date` sender `PUT /api/check-in-notes/{id}/to-date` med
+`{"toDate": "YYYY-MM-DD"}` lik dagen etter siste dag. Live 16.10.2026 lagret
+Vigilo verdien som eksklusiv slutt: `toDate` 30.12. ga siste forekomst 29.12.
+Appen sender valgt dag uten +1 og forkorter dermed serien én dag mer enn valgt;
+det kopieres ikke. Siste dag kan ikke være før startdatoen, og ikke før
+`earliestAllowedDate` (eller i dag når fristen mangler), som i appens
+sluttdatoskjerm. `delete_pickup_note` sender `DELETE /api/check-in-notes/{id}`
+uten body; live-verifisert 16.10.2026 (HTTP 204, serien borte ved tilbake-lesing,
+andre meldinger urørt). Kontroller alltid resultatet med `list_pickup_notes`.
 
 Skolefravær tar datoer som `YYYY-MM-DD` (begge dager inkludert).
 Ved sending konverteres siste fraværsdag til eksklusiv sluttdato dagen etter,

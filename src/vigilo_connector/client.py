@@ -745,19 +745,8 @@ class VigiloClient:
         local = moment.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Oslo")).date()
         return local + timedelta(days={5: 2, 6: 1}.get(local.weekday(), 0))
 
-    def create_pickup_note(
-        self, child_id: str, organizational_unit_id: str, type_id: str,
-        from_date: str, to_date: str, time_of_day: str, note_text: str | None = None,
-        repeat_days: list[str] | None = None, every_other_week: bool = False,
-    ) -> dict:
-        """Opprett éi hentemelding (POST /api/check-in-notes) som appen gjer det.
-
-        Datoar YYYY-MM-DD med begge dagar inkludert; tid HH:MM i kvarter mellom
-        06:00 og 18:00. Utan repeat_days gjeld meldinga kvar dag i perioden.
-        """
-        for field, value in (("child_id", child_id), ("type_id", type_id)):
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{field} må vere utfylt.")
+    @staticmethod
+    def _pickup_dates(from_date: str, to_date: str) -> tuple[date, date]:
         if not all(isinstance(d, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d)
                    for d in (from_date, to_date)):
             raise ValueError("Datoane må ha format YYYY-MM-DD.")
@@ -769,24 +758,44 @@ class VigiloClient:
             raise ValueError("to_date kan ikkje vere før from_date.")
         if end == date.max:
             raise ValueError("to_date må tillate sluttdato dagen etter.")
+        return start, end
+
+    @staticmethod
+    def _pickup_time(time_of_day: str) -> str:
         if not isinstance(time_of_day, str) or not re.fullmatch(r"\d{2}:\d{2}", time_of_day):
             raise ValueError("time_of_day må ha format HH:MM.")
         hour, minute = int(time_of_day[:2]), int(time_of_day[3:])
         # Appens timehjul: 06–18 i kvarter, 18:00 er siste val.
         if minute not in (0, 15, 30, 45) or not (6 <= hour < 18 or (hour, minute) == (18, 0)):
             raise ValueError("time_of_day må vere eit kvarter mellom 06:00 og 18:00.")
-        if note_text is not None and not isinstance(note_text, str):
-            raise ValueError("note_text må vere tekst eller null.")
+        return f"{time_of_day}:00"
+
+    def _pickup_repeat(self, repeat_days, every_other_week) -> list[str] | None:
         if type(every_other_week) is not bool:
             raise ValueError("every_other_week må vere true eller false.")
-        if repeat_days is not None:
-            if (not isinstance(repeat_days, list) or not repeat_days
-                    or any(d not in self.PICKUP_WEEKDAYS for d in repeat_days)):
-                raise ValueError("repeat_days må vere minst éin av " + ", ".join(self.PICKUP_WEEKDAYS) + ".")
-            repeat_days = [d for d in self.PICKUP_WEEKDAYS if d in repeat_days]
-        elif every_other_week:
-            raise ValueError("every_other_week krev repeat_days.")
+        if repeat_days is None:
+            if every_other_week:
+                raise ValueError("every_other_week krev repeat_days.")
+            return None
+        if (not isinstance(repeat_days, list) or not repeat_days
+                or any(d not in self.PICKUP_WEEKDAYS for d in repeat_days)):
+            raise ValueError("repeat_days må vere minst éin av " + ", ".join(self.PICKUP_WEEKDAYS) + ".")
+        return [d for d in self.PICKUP_WEEKDAYS if d in repeat_days]
 
+    def _pickup_body(
+        self, child_id: str, organizational_unit_id: str, type_id: str, start: date,
+        end: date, wire_time: str, note_text: str | None, repeat_days: list[str] | None,
+        every_other_week: bool, check_deadline: bool = True,
+    ) -> tuple[dict, dict]:
+        """Validér mot konfigurasjonen og bygg felles body for POST og PUT.
+
+        Som appens CreateCheckoutNoteUseCase: kategori frå typen, eksklusiv toDate,
+        og Gson utelèt daysOfWeek når det er null.
+        """
+        if not isinstance(type_id, str) or not type_id.strip():
+            raise ValueError("type_id må vere utfylt.")
+        if note_text is not None and not isinstance(note_text, str):
+            raise ValueError("note_text må vere tekst eller null.")
         options = self.pickup_note_options(child_id, organizational_unit_id)
         selected = next((t for t in options["types"] if t.get("id") == type_id), None)
         if (selected is None or selected.get("isActive") is not True
@@ -796,29 +805,32 @@ class VigiloClient:
         category = selected["category"]
         if selected.get("useComment") is True and not (note_text or "").strip():
             raise ValueError("Denne typen krev tekst i note_text.")
-        deadline = next((d for d in options["registrationDeadlines"]
-                         if isinstance(d, dict) and d.get("noteCategory") == category), None)
-        earliest = self._pickup_earliest_date(deadline)
-        if earliest is not None and start < earliest:
-            raise ValueError(f"Registreringsfristen er passert; tidlegaste dato er {earliest.isoformat()}.")
-
-        # Gson utelèt null-felt, så daysOfWeek manglar utan gjentaking.
+        if check_deadline:
+            earliest = self._pickup_earliest(options, category)
+            if earliest is not None and start < earliest:
+                raise ValueError(f"Registreringsfristen er passert; tidlegaste dato er {earliest.isoformat()}.")
         recurrence = {"recurrenceType": "weekly" if repeat_days else "daily",
                       "interval": 2 if repeat_days and every_other_week else 1}
         if repeat_days:
             recurrence["daysOfWeek"] = repeat_days
-        payload = {
-            "childPersonIds": [child_id], "category": category, "typeId": type_id,
+        return {
+            "category": category, "typeId": type_id,
             "fromDate": start.isoformat(), "toDate": (end + timedelta(days=1)).isoformat(),
-            "recurrencePattern": recurrence, "timeOfDay": f"{time_of_day}:00",
-            "noteText": note_text or "",
-        }
+            "recurrencePattern": recurrence, "timeOfDay": wire_time, "noteText": note_text or "",
+        }, selected
+
+    def _pickup_earliest(self, options: dict, category: str) -> date | None:
+        deadline = next((d for d in options["registrationDeadlines"]
+                         if isinstance(d, dict) and d.get("noteCategory") == category), None)
+        return self._pickup_earliest_date(deadline)
+
+    def _pickup_write(self, method: str, path: str, payload: dict | None,
+                      organizational_unit_id: str, outcome: str) -> None:
+        """Skriv med SFO-einingsheader; kjende valideringskodar blir forklarte."""
         try:
-            self._write_json(
-                "POST", "/api/check-in-notes", payload, retry_401=True,
-                headers={"X-Organizational-Unit-Id": organizational_unit_id},
-                outcome="Hentemeldinga kan vere oppretta. Kontroller list_pickup_notes",
-            )
+            self._write_json(method, path, payload, retry_401=True,
+                             headers={"X-Organizational-Unit-Id": organizational_unit_id},
+                             outcome=outcome)
         except httpx.HTTPStatusError as error:
             codes = self._validation_codes(error.response)
             if not codes:
@@ -827,14 +839,188 @@ class VigiloClient:
                 raise ValueError("Vigilo avviste: registreringsfristen er passert for datoen. "
                                  "Sjå registrationDeadlines i pickup_note_options.") from None
             raise ValueError("Vigilo avviste hentemeldinga: " + ", ".join(codes) + ".") from None
+
+    def create_pickup_note(
+        self, child_id: str, organizational_unit_id: str, type_id: str,
+        from_date: str, to_date: str, time_of_day: str, note_text: str | None = None,
+        repeat_days: list[str] | None = None, every_other_week: bool = False,
+    ) -> dict:
+        """Opprett éi hentemelding (POST /api/check-in-notes) som appen gjer det.
+
+        Datoar YYYY-MM-DD med begge dagar inkludert; tid HH:MM i kvarter mellom
+        06:00 og 18:00. Utan repeat_days gjeld meldinga kvar dag i perioden.
+        """
+        if not isinstance(child_id, str) or not child_id.strip():
+            raise ValueError("child_id må vere utfylt.")
+        if not isinstance(type_id, str) or not type_id.strip():
+            raise ValueError("type_id må vere utfylt.")
+        start, end = self._pickup_dates(from_date, to_date)
+        wire_time = self._pickup_time(time_of_day)
+        if note_text is not None and not isinstance(note_text, str):
+            raise ValueError("note_text må vere tekst eller null.")
+        repeat_days = self._pickup_repeat(repeat_days, every_other_week)
+        body, selected = self._pickup_body(
+            child_id, organizational_unit_id, type_id, start, end, wire_time, note_text,
+            repeat_days, every_other_week)
+        self._pickup_write("POST", "/api/check-in-notes", {"childPersonIds": [child_id], **body},
+                           organizational_unit_id,
+                           "Hentemeldinga kan vere oppretta. Kontroller list_pickup_notes")
         return {
             "status": "created", "childId": child_id,
             "organizationalUnitId": organizational_unit_id,
-            "type": {"id": type_id, "name": selected.get("name"), "category": category},
+            "type": {"id": type_id, "name": selected.get("name"), "category": body["category"]},
             "fromDate": from_date, "toDate": to_date, "timeOfDay": time_of_day,
             "repeatDays": repeat_days, "everyOtherWeek": bool(repeat_days and every_other_week),
             "noteText": note_text or "",
             "verify": f"Kontroller med list_pickup_notes for {from_date[:7]}.",
+        }
+
+    def _existing_pickup_note(self, child_id: str, note_id: str, month: str) -> dict:
+        """Finn meldinga i månadslista; appen har ingen GET for éi melding."""
+        if not isinstance(child_id, str) or not child_id.strip():
+            raise ValueError("child_id må vere utfylt.")
+        if not isinstance(note_id, str) or not note_id.strip():
+            raise ValueError("note_id må vere utfylt.")
+        with self.fresh_reads(True):
+            notes = self.pickup_notes(child_id, month)["notes"]
+        note = next((n for n in notes if isinstance(n, dict) and n.get("id") == note_id), None)
+        if note is None:
+            raise ValueError("Fann ikkje hentemeldinga for barnet i månaden; "
+                             "bruk id og ein månad frå list_pickup_notes.")
+        if note.get("childPersonId") not in (None, child_id):
+            raise ValueError("Hentemeldinga høyrer ikkje til barnet.")
+        unit = note.get("organizationalUnitId")
+        if not isinstance(unit, str) or not unit:
+            raise ValueError("Hentemeldinga manglar SFO-eining i svaret frå Vigilo.")
+        self._require_after_school_unit(child_id, unit)
+        return note
+
+    @staticmethod
+    def _note_date(value) -> date:
+        try:
+            return date.fromisoformat(str(value)[:10])
+        except ValueError:
+            raise ValueError("Ugyldig dato i hentemeldinga frå Vigilo.") from None
+
+    def update_pickup_note(
+        self, child_id: str, note_id: str, month: str, type_id: str | None = None,
+        from_date: str | None = None, to_date: str | None = None,
+        time_of_day: str | None = None, note_text: str | None = None,
+        repeat_days: list[str] | None = None, every_other_week: bool | None = None,
+    ) -> dict:
+        """Endre heile serien (PUT /api/check-in-notes/{id}) som appens endringsskjerm.
+
+        Felt som er None beheld verdien frå meldinga. repeat_days=[] slår av
+        gjentaking. Ein vekentleg serie utan dagar blir avvist: serveren lagrar han,
+        men han gjeld då berre startdagen.
+        """
+        note = self._existing_pickup_note(child_id, note_id, month)
+        if note.get("canUpdate") is not True:
+            hint = (" Bruk set_pickup_note_end_date for ny sluttdato."
+                    if note.get("canUpdateToDate") is True else "")
+            raise ValueError("Vigilo tillèt ikkje å endre denne hentemeldinga (canUpdate=false)." + hint)
+        unit = note["organizationalUnitId"]
+        pattern = note.get("recurrencePattern") if isinstance(note.get("recurrencePattern"), dict) else {}
+        old_type = note.get("type") if isinstance(note.get("type"), dict) else {}
+
+        old_start = self._note_date(note.get("fromDate"))
+        old_end = self._note_date(note.get("toDate")) - timedelta(days=1)
+        start, end = self._pickup_dates(
+            from_date if from_date is not None else old_start.isoformat(),
+            to_date if to_date is not None else old_end.isoformat())
+        if time_of_day is None:
+            time_of_day = str(note.get("timeOfDay") or "")[:5]
+        try:
+            wire_time = self._pickup_time(time_of_day)
+        except ValueError as error:
+            raise ValueError(f"{error} Oppgi time_of_day.") from None
+        if note_text is None:
+            note_text = note.get("noteText") if isinstance(note.get("noteText"), str) else ""
+        if type_id is None:
+            type_id = old_type.get("id")
+
+        if repeat_days == []:
+            if every_other_week:
+                raise ValueError("every_other_week krev repeat_days.")
+            repeat_days, every_other_week = None, False
+        elif repeat_days is None and pattern.get("recurrenceType") == "weekly":
+            old_days = [d.lower() for d in pattern.get("daysOfWeek") or [] if isinstance(d, str)]
+            if not old_days:
+                raise ValueError("Serien er vekentleg utan vekedagar. Oppgi repeat_days, "
+                                 "eller repeat_days=[] for å slå av gjentaking.")
+            repeat_days = old_days
+            if every_other_week is None:
+                every_other_week = pattern.get("interval") == 2
+        if every_other_week is None:
+            every_other_week = False
+        repeat_days = self._pickup_repeat(repeat_days, every_other_week)
+
+        body, selected = self._pickup_body(
+            child_id, unit, type_id, start, end, wire_time, note_text, repeat_days,
+            every_other_week, check_deadline=start != old_start)
+        self._pickup_write("PUT", f"/api/check-in-notes/{quote(note_id, safe='')}", body, unit,
+                           "Hentemeldinga kan vere endra. Kontroller list_pickup_notes")
+        return {
+            "status": "updated", "childId": child_id, "noteId": note_id,
+            "organizationalUnitId": unit,
+            "type": {"id": type_id, "name": selected.get("name"), "category": body["category"]},
+            "fromDate": start.isoformat(), "toDate": end.isoformat(), "timeOfDay": wire_time[:5],
+            "repeatDays": repeat_days, "everyOtherWeek": bool(repeat_days and every_other_week),
+            "noteText": body["noteText"],
+            "verify": f"Kontroller med list_pickup_notes for {start.isoformat()[:7]}.",
+        }
+
+    def set_pickup_note_end_date(self, child_id: str, note_id: str, month: str,
+                                 last_date: str) -> dict:
+        """Ny siste dag for ein serie (PUT /api/check-in-notes/{id}/to-date).
+
+        Vigilo lagrar toDate som eksklusiv slutt (live 2026-10-16), så siste dag
+        blir sendt som dagen etter. Appen sender vald dag utan +1 og kortar
+        dermed serien éin dag meir enn vald; det blir ikkje kopiert.
+        """
+        note = self._existing_pickup_note(child_id, note_id, month)
+        if note.get("canUpdateToDate") is not True:
+            raise ValueError("Vigilo tillèt ikkje ny sluttdato for denne hentemeldinga "
+                             "(canUpdateToDate=false).")
+        if not isinstance(last_date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", last_date):
+            raise ValueError("last_date må ha format YYYY-MM-DD.")
+        try:
+            last = date.fromisoformat(last_date)
+        except ValueError:
+            raise ValueError("last_date må vere ein gyldig dato på format YYYY-MM-DD.") from None
+        unit = note["organizationalUnitId"]
+        start = self._note_date(note.get("fromDate"))
+        if last < start:
+            raise ValueError(f"last_date kan ikkje vere før startdatoen {start.isoformat()}.")
+        # Som sluttdatoskjermen: frå fristen når han finst, elles frå i dag.
+        category = note.get("category")
+        earliest = (self._pickup_earliest(self.pickup_note_options(child_id, unit), category)
+                    if isinstance(category, str) else None)
+        if earliest is None:
+            earliest = datetime.now(ZoneInfo("Europe/Oslo")).date()
+        if last < earliest:
+            raise ValueError(f"last_date kan ikkje vere før {earliest.isoformat()}.")
+        self._pickup_write("PUT", f"/api/check-in-notes/{quote(note_id, safe='')}/to-date",
+                           {"toDate": (last + timedelta(days=1)).isoformat()}, unit,
+                           "Sluttdatoen kan vere endra. Kontroller list_pickup_notes")
+        return {
+            "status": "endDateUpdated", "childId": child_id, "noteId": note_id,
+            "organizationalUnitId": unit, "lastDate": last.isoformat(),
+            "verify": f"Kontroller med list_pickup_notes for {last.isoformat()[:7]}.",
+        }
+
+    def delete_pickup_note(self, child_id: str, note_id: str, month: str) -> dict:
+        """Slett heile hentemeldinga/serien (DELETE /api/check-in-notes/{id})."""
+        note = self._existing_pickup_note(child_id, note_id, month)
+        if note.get("canDelete") is not True:
+            raise ValueError("Vigilo tillèt ikkje å slette denne hentemeldinga (canDelete=false).")
+        unit = note["organizationalUnitId"]
+        self._pickup_write("DELETE", f"/api/check-in-notes/{quote(note_id, safe='')}", None, unit,
+                           "Hentemeldinga kan vere sletta. Kontroller list_pickup_notes")
+        return {
+            "status": "deleted", "childId": child_id, "noteId": note_id,
+            "organizationalUnitId": unit,
+            "verify": f"Kontroller med list_pickup_notes for {month}.",
         }
 
     @staticmethod

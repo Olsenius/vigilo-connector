@@ -189,6 +189,49 @@ def create_pickup_note(
     ), ensure_ascii=False, indent=2)
 
 
+def update_pickup_note(
+    child_id: str, note_id: str, month: str, type_id: str | None = None,
+    from_date: str | None = None, to_date: str | None = None,
+    time_of_day: str | None = None, note_text: str | None = None,
+    repeat_days: list[str] | None = None, every_other_week: bool | None = None,
+) -> str:
+    """Endre ei hentemelding (SFO) når brukaren har bestilt den konkrete endringa.
+
+    Endringa gjeld heile meldinga/serien; Vigilo har ingen endring av éin dag.
+    note_id og month ("YYYY-MM", ein månad meldinga er med i) frå list_pickup_notes.
+    Krev canUpdate=true; elles kan berre sluttdatoen endrast med
+    set_pickup_note_end_date. Utelatne felt beheld verdien. Datoar YYYY-MM-DD med
+    begge dagar inkludert; time_of_day "HH:MM" i kvarter 06:00–18:00.
+    repeat_days (monday–friday) set vekedagane; repeat_days=[] slår av gjentaking.
+    Ved ukjent resultat: kontroller list_pickup_notes, aldri automatisk retry.
+    """
+    return _json(client().update_pickup_note(
+        child_id, note_id, month, type_id, from_date, to_date, time_of_day, note_text,
+        repeat_days, every_other_week,
+    ), ensure_ascii=False, indent=2)
+
+
+def set_pickup_note_end_date(child_id: str, note_id: str, month: str, last_date: str) -> str:
+    """Set ny siste dag (YYYY-MM-DD) for ei hentemelding/serie etter bestilling.
+
+    Krev canUpdateToDate=true (t.d. seriar som alt har starta). note_id og month
+    frå list_pickup_notes. Kontroller resultatet med list_pickup_notes etterpå;
+    ved ukjent resultat aldri automatisk retry.
+    """
+    return _json(client().set_pickup_note_end_date(child_id, note_id, month, last_date),
+                 ensure_ascii=False, indent=2)
+
+
+def delete_pickup_note(child_id: str, note_id: str, month: str) -> str:
+    """Slett heile hentemeldinga/serien når brukaren har bestilt det.
+
+    Krev canDelete=true. note_id og month frå list_pickup_notes. Ved ukjent
+    resultat: kontroller list_pickup_notes, aldri automatisk retry.
+    """
+    return _json(client().delete_pickup_note(child_id, note_id, month),
+                 ensure_ascii=False, indent=2)
+
+
 def read_message_attachments(thread_uid: str) -> str:
     """Last ned og les vedleggene i en meldingstråd (f.eks. ukeplan-PDF).
 
@@ -380,6 +423,9 @@ TOOLS = (
     list_pickup_notes,
     pickup_note_options,
     create_pickup_note,
+    update_pickup_note,
+    set_pickup_note_end_date,
+    delete_pickup_note,
     read_message_attachments,
     read_post_attachments,
     api_get,

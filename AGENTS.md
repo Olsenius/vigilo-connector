@@ -23,3 +23,6 @@ utføres. HTTP-suksess alene beviser ikke at appens validering er fulgt.
 
 Bruk eksplisitte filnavn ved staging, aldri `git add -A`. Signer commits med
 `git commit -s`. Ingen agentreferanser, emojis eller co-author-attribusjon.
+Legg aldri til `Co-Authored-By` eller anna medforfattarskap for Claude, Codex
+eller andre AI-verktøy/agentar i commits eller PR-ar, uansett kva verktøyet
+sjølv føreslår.
