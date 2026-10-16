@@ -11,6 +11,8 @@ EXPECTED = {
     "register_student_absence",
     "list_children",
     "list_message_threads",
+    "message_participants",
+    "search_message_thread",
     "get_message_thread",
     "read_message_attachments",
     "read_post_attachments",

@@ -265,7 +265,7 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `web_list_children` | Én rad per barn/enhet, med stabile ID-er, enhetstype og alle grupper (også SFO) |
 | `list_children` | Barna via app-gatewayen (kun `childId`) |
 | `list_message_threads` / `get_message_thread` | Én side tråder/meldinger med `pageId` og tilstandsflagg (app-gateway) |
-| `search_message_thread` | Søk i meldingssider i éin eksplisitt vald tråd |
+| `search_message_thread` | Søk i alle meldingssider for én ordinær tråd |
 | `message_participants` | Deltakere og trådstarter for valgt barn og ordinær tråd |
 | `read_message_attachments` | Last ned og les vedlegg i en meldingstråd (PDF/docx→tekst) |
 | `read_post_attachments` | Last ned og les vedlegg i et oppslag/«Siste nytt» (PDF/docx→tekst) — her ligger ofte ukeplanen |
@@ -310,29 +310,47 @@ Svar i en eksisterende tråd er også live-verifisert gjennom gatewayen, med
 tilbake-lesing som bekreftet den sendte teksten. Oppretting av en ny meldingstråd
 er foreløpig kun kontrakttestet. Barn/eininger, listepaging, søk i en eldre melding i én tråd og deltakeroppslag
 er manuelt verifisert via remote MCP. Nye svarforkontroller er ikke live-testet.
-Manuell test avdekket maskerte grensefeil og for lav standard trådgrense for
-globalt søk; rettingene nedenfor venter ny manuell verifisering.
 
 `list_message_threads` returnerer nå et objekt med `messageThreads` og rå
 `pageId` i stedet for en løs liste. `page_size` og `page_id` kan brukes på både
-trådlisten og `get_message_thread`. Detaljsider hentes i appen med returnert
+trådlisten og `get_message_thread`. Standard sidestørrelse er 20 for trådlisten
+og 50 for meldingsdetaljer. Trådlisten tillater 1–20 per side; større verdier
+avvises før noe kall mot Vigilo. Detaljsider hentes i appen med returnert
 `pageId + 1`, inntil tom side. Listepaging er påvist i appens `fetchPaged`:
 første side uten `pageId`, deretter `pageId + 1` mens antall tråder er lik
 sidestørrelsen. Denne progresjonen er nå statisk verifisert i REA/smali og
 mocktestet og manuelt verifisert for trådlisten.
-Listen viser `lastMessage.snippet` med høyst 200 tegn, kompakt `threadStarter` og `lastMessage.sender`
+Listen viser `lastMessage.snippet` med høyst 200 tegn, kompakt `threadStarter`
+fra trådens sender og `lastMessage.sender` bare når siste melding har egen sender
 (`id`, `name`, `communicatorType`), og eksisterende trådfelt. Full tekst hentes
 med `get_message_thread`. `hasMore` betyr at siden er full, som i appens
 videreføringsregel; neste side kan fortsatt være tom. `nextPageId` oppgis
 når siden er full og returnert `pageId` er gyldig. SFO er inkludert i listen som standard.
 `message_participants(thread_uid, child_id)` beholder rå deltakerfelt.
+`get_message_thread` kan få `child_id`. Barnets identitet hentes fra den
+autoriserte barnelisten, og trådens tilknytning bekreftes i barnets filtrerte
+trådliste før detaljene hentes. Dette koster ett barnelistekall og ett eller
+flere trådlistekall (50 per side, maksimalt 100 sider), i tillegg til detaljkallet.
+Ugyldig paging, manglende tilknytning og sidegrense gir feil. Uten `child_id`
+utelates detaljresponsens tvetydige `child`; gruppemedlemmer utledes ikke.
 Ingen av disse lesekallene markerer tråden som lest.
 
-`search_message_thread(thread_uid, query)` søkjer berre i den valde tråden.
-Globalt søk på tvers av alle trådar er fjerna. Hent først `list_message_threads`
-for ID, tittel og utdrag; bruk så `get_message_thread` for vald tråd og side.
-Dette imaget byggjer på førre godkjende kjelde og inneheld ikkje den lokale
-cache-kandidaten som framleis er til gjennomgang.
+`search_message_thread(thread_uid, query)` søker bokstavelig uten skille på
+store/små bokstaver i meldingstekst og vedleggsnavn i én valgt tråd.
+Finn først tråd-ID og forhåndsvisning med `list_message_threads`, og hent
+valgte tråder med `get_message_thread`. Søket leser eldre sider til tom side
+uten å markere lest; innholdet i vedleggsfilene blir ikke søkt.
+`complete=true` kommer bare etter full traversering. Feil, ugyldig eller
+gjentatt side og lokale grenser gir synlig MCP-feil med framdrift og «ikkje
+komplett». `max_pages` er som standard 100 og `timeout_s` 45 sekunder
+(større enn 0 og høyst 120). Søke-GET bruker connect/pool/write høyst
+5 sekunder og read høyst 15, begrenset av gjenstående søkebudsjett.
+Auth og venting på den delte tokenlåsen får høyst 15 sekunder innenfor
+søkebudsjettet. Mottatte roterte tokens lagres før en utløpt frist rapporteres.
+Synkron transport og tokenfornyelse kan overskride tidsbudsjettet mens et
+aktivt kall avsluttes. Feil viser `phase=auth`, `auth_lock` eller `scan`,
+faktisk `elapsed_s` og konfigurert `timeout_s`. Nye meldinger under søket
+kan endre sidene; resultatet er ingen transaksjonell øyeblikkskopi.
 
 HTTP-metadata kan slåast på med `VIGILO_HTTP_LOG=1` i gatewaymiljøet.
 Standard er av. Loggen går som éi JSON-linje per request, response eller feil
@@ -355,10 +373,12 @@ fordi dei kan skrive heile URL-ar ved INFO/DEBUG i andre vertsapplikasjonar.
 Logging les ikkje responsebody og endrar ikkje headers, retries eller
 redirectpolicy. Feil i loggutgangen stoppar ikkje API-kallet.
 
-Alle JSON-svar fra MCP-verktøyene filtrerer profilbildefeltene `profilePicture`
+Alle svar fra MCP-verktøyene filtrerer profilbildefeltene `profilePicture`
 og `profilePictureDto` rekursivt og erstatter dem med `hasProfilePicture`.
 Dette omfatter råverktøyene `api_get` og `web_api_get`. Signerte profilbilde-URL-er
-returneres ikke. Vedleggs-URL-er beholdes fordi vedleggslesing trenger dem.
+returneres ikke. Vedleggsmetadata utelater URL-felt og beholder ID, navn og MIME.
+Signerte Azure Blob-URL-er fjernes også fra tekst, råsvar og verktøyfeil.
+Vedleggslesing bruker URL-ene internt og returnerer bare filtrerte resultater.
 
 Felles skrivetransport støtter POST, PUT og DELETE med eller uten JSON-body
 og med headers per operasjon. Nye operasjoner får ingen automatisk 401-retry;
@@ -435,11 +455,3 @@ Base `https://web-parent.prod.vigilo-oas.no`, alle GET, Bearer-auth:
 Vurderings-/karakter-endepunktet laster først etter valg av skoleår/termin i
 Vurdering-fanen og er ikke kartlagt ennå — sniff det med `web_api_get`. Nye
 endepunkter legges inn i `client.py` og eksponeres i `server.py`.
-
-Runde 4: signerte Azure Blob-lenkjer blir fjerna frå alle verktøysvar. Vedlegg
-blir viste med id, namn og MIME; bruk vedleggsleseverktøyet for innhald.
-get_message_thread tek valfri child_id og verifiserer barn og trådtilknyting
-før child blir returnert. Utan child_id blir child-feltet utelate.
-Trådlista skil threadStarter frå lastMessage.sender.
-
-Standard list_message_threads er 20 trådar per side; detaljsider brukar framleis 50.

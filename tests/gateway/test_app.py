@@ -36,6 +36,22 @@ class FakeVigilo:
             raise WriteOutcomeUnknown("Meldingen kan være sendt. Kontroller meldingstrådene.")
         return {"status": "sent", "threadUid": args[0]}
 
+    def search_message_thread(self, thread_uid, query, page_size, max_pages, timeout_s=45.0):
+        return {"threadUid": thread_uid, "query": query, "complete": True,
+                "matches": [{"pageId": 2, "message": {"body": "Test eldre melding"}}]}
+
+    def message_participants(self, thread_uid, child_id):
+        return {"recipients": [{"id": "test-recipient"}], "childId": child_id,
+                "threadUid": thread_uid}
+
+    def get_message_threads_page(self, child_id, page_size, include_after_school, page_id):
+        return {"messageThreads": [{"threadUid": "test-thread"}], "pageId": page_id,
+                "pageSize": page_size, "includeAfterSchoolMessages": include_after_school}
+
+    def get_thread(self, thread_uid, page_size, page_id):
+        return {"threadUid": thread_uid, "pageId": page_id, "isReplyDisabled": False,
+                "messages": [{"body": "Test eldre melding"}]}
+
     def children(self):
         if self.fail:
             raise AuthError("Ingen tokens i /data/vigilo/tokens.json — kjør `vigilo-login` først.")
@@ -169,7 +185,7 @@ def test_full_oauth_flyt_og_verktoykall(client):
     assert {"web_list_children", "message_contacts", "register_student_absence"} <= names
     assert {"absence_codes", "register_childcare_absence"} <= names
     assert {"send_message", "reply_message"} <= names
-    assert len(names) == 19
+    assert len(names) == 21
 
     res = _sse_json(_rpc(client, tok["access_token"], "tools/call",
                          {"name": "web_list_children", "arguments": {}}, id_=3, session=session))
@@ -187,7 +203,7 @@ def test_full_oauth_flyt_og_verktoykall(client):
 def test_api_token_virker(client):
     session = _mcp_session(client, API_TOKEN)
     tools = _sse_json(_rpc(client, API_TOKEN, "tools/list", {}, id_=2, session=session))
-    assert len(tools["result"]["tools"]) == 19
+    assert len(tools["result"]["tools"]) == 21
 
 
 @pytest.mark.parametrize("unknown", [False, True])
@@ -321,3 +337,25 @@ def test_verktoyskjema_bevares_gjennom_feilinnpakning(client):
     assert set(childcare["inputSchema"]["required"]) == {
         "child_id", "organizational_unit_id", "from_date", "to_date", "absence_code_id",
     }
+
+
+@pytest.mark.parametrize("name,args,expected", [
+    ("search_message_thread", {"thread_uid": "test-thread", "query": "eldre"},
+     {"threadUid": "test-thread", "query": "eldre", "complete": True,
+      "matches": [{"pageId": 2, "message": {"body": "Test eldre melding"}}]}),
+    ("message_participants", {"thread_uid": "test-thread", "child_id": "test-child"},
+     {"recipients": [{"id": "test-recipient"}], "childId": "test-child", "threadUid": "test-thread"}),
+    ("list_message_threads", {"child_id": "test-child", "page_size": 7, "page_id": 2},
+     {"messageThreads": [{"threadUid": "test-thread", "lastMessage": {"snippet": ""}}],
+      "pageId": 2, "pageSize": 7, "includeAfterSchoolMessages": True, "hasMore": False}),
+    ("get_message_thread", {"thread_uid": "test-thread", "page_size": 7, "page_id": 2},
+     {"threadUid": "test-thread", "pageId": 2, "isReplyDisabled": False,
+      "messages": [{"body": "Test eldre melding"}]}),
+])
+def test_message_discovery_through_gateway(client, name, args, expected):
+    session = _mcp_session(client, API_TOKEN)
+    result = _sse_json(_rpc(client, API_TOKEN, "tools/call", {
+        "name": name, "arguments": args,
+    }, id_=3, session=session))["result"]
+    assert result.get("isError") is not True
+    assert json.loads(result["content"][0]["text"]) == expected

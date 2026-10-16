@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from vigilo_connector import auth
-from vigilo_connector.client import VigiloClient
+from vigilo_connector.client import VigiloClient, WriteOutcomeUnknown
 from vigilo_connector.config import API_BASE, APP_VERSION, AUTH_BASE, WEB_API_BASE
 from vigilo_connector.transport import JSON_CONTENT_TYPE, android_client, android_json
 from tests.test_parent_actions import FakeStore, transport
@@ -153,7 +153,7 @@ def test_write_redirects_do_not_replay_post(client, status, operation):
         requests.append(request)
         return httpx.Response(status, headers={'Location': '/another-write'})
     transport(client, handler)
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(WriteOutcomeUnknown):
         if operation == 'message':
             client._post_message('/api/messages', {'body': 'Testmelding'})
         else:

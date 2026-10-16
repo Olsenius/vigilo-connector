@@ -26,6 +26,10 @@ def send(client, **changes):
 
 
 def contacts(request):
+    if request.url.path.startswith("/api/messages/threads/"):
+        return httpx.Response(200, json={
+            "threadUid": "test-thread", "isReplyDisabled": False, "isDeleted": False,
+        })
     assert dict(request.url.params) == {
         "childId": "test-child", "organizationalUnitId": "test-school",
     }
@@ -44,7 +48,8 @@ def test_new_message_contract(client, status):
         assert request.headers["authorization"] == "Bearer old"
         assert json.loads(request.content) == {
             "organizationalUnitId": "test-school", "title": "Testtittel",
-            "body": "Testmelding", "attachments": [], "recipients": [CONTACT],
+            "body": "Testmelding", "attachments": [], "recipients": [
+                {"type": "client", "externalId": "test-child"}, CONTACT],
         }
         return httpx.Response(status)
     transport(client, handler)
@@ -74,6 +79,8 @@ def test_unknown_recipient_never_posts(client):
 
 def test_reply_contract(client):
     def handler(request):
+        if request.method == "GET":
+            return contacts(request)
         assert request.method == "POST"
         assert request.url.path == "/api/messages/test-thread/reply"
         assert not request.url.query
@@ -127,3 +134,29 @@ def test_auth_retry_once(client, operation, second):
     else:
         assert call()["status"] == "sent"
     assert len(posts) == 2
+
+
+def test_group_member_and_guardian_recipients_are_explicit_and_deduplicated(client):
+    guardian = {'type': 'legalGuardian', 'externalId': 'test-guardian'}
+    def handler(request):
+        if request.method == 'GET':
+            return httpx.Response(200, json={
+                'communicationGroups': [{'groupId': 'test-group', 'employees': [
+                    {'id': 'test-contact', 'employeeId': 'not-contact-id'}]}],
+                'legalGuardians': [{'id': 'test-guardian'}],
+            })
+        assert json.loads(request.content)['recipients'] == [
+            {'type': 'client', 'externalId': 'test-child'}, CONTACT, guardian]
+        return httpx.Response(204)
+    transport(client, handler)
+    assert send(client, recipients=[CONTACT, CONTACT, guardian])['recipients'] == [CONTACT, guardian]
+
+
+def test_group_id_is_not_a_wire_recipient(client):
+    def handler(request):
+        assert request.method == 'GET'
+        return httpx.Response(200, json={'communicationGroups': [
+            {'groupId': 'test-group', 'employees': [{'id': 'test-contact'}]}]})
+    transport(client, handler)
+    with pytest.raises(ValueError, match='kontaktlisten'):
+        send(client, recipients=[{'type': 'employee', 'externalId': 'test-group'}])
