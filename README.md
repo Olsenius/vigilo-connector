@@ -277,6 +277,8 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `register_student_absence` | Registrer skolefravær med periode, tittel, begrunnelse og valgte mottakere |
 | `absence_codes` | Aktive fraværskoder for valgt barnehage |
 | `register_childcare_absence` | Registrer barnehagefravær med periode, aktiv kode og valgfri merknad |
+| `list_pickup_notes` | Hentemeldinger (SFO) for et barn i én kalendermåned, med barnets SFO-enheter |
+| `pickup_note_options` | Aktiverte kategorier, meldingstyper og registreringsfrister for en SFO-enhet |
 | `consent_forms` | Samtykkeskjemaer (krever `organizationalUnitId`) |
 | `timetable` | Timeplan/ukesplan for en ISO-uke |
 | `scheduling_events` | Prøver/aktiviteter i timeplanen for en uke |
@@ -402,6 +404,30 @@ nytt etter transportfeil, 3xx eller 5xx; utfallet regnes da som ukjent.
 Feilmeldinger viser HTTP-status og et
 formatbegrenset `X-Correlation-Id` når tilgjengelig, aldri responsinnhold.
 Nye brukerrettede skrivehandlinger utover de fire eksisterende er ikke lagt til.
+
+Hentemeldinger leses bare; oppretting, endring og sletting er ikke støttet ennå.
+Som i appen vises de bare for barn med en SFO-enhet (`type: afterSchool` i
+app-gatewayens barneliste); uten SFO-enhet gjøres ikke noe kall mot
+`/api/check-in-notes`. `list_pickup_notes(child_id, month)` henter én
+kalendermåned (`YYYY-MM`, standard inneværende måned i Europe/Oslo) med
+`childPersonId`, `fromDate` lik første dag og eksklusiv `toDate` lik første
+dag i neste måned, slik appens månedsvisning gjør. `pickup_note_options` krever
+en av barnets SFO-enheter. Den henter konfigurasjonen med headeren
+`X-Organizational-Unit-Id`, alle meldingstyper uten kategori (som appen) og
+registreringsfrister per aktivert kategori. Typer markeres med
+`categoryEnabled`; appens eventuelle videre filtrering er ikke kartlagt.
+Fristoppslag per kategori er utledet fra appens konfigurasjonsmodell, siden
+repository-metoden ikke er dekompilert.
+
+Vigilo sender `fromDate`/`toDate` som lokal tid uten sone, `timeOfDay` som
+`HH:MM:SS` og `dateOccurrences` som UTC-tidspunkt for midnatt i Europe/Oslo.
+Med `day` (`YYYY-MM-DD`) beholdes bare meldinger med en forekomst den dagen
+regnet i Oslo-tid. Flere meldinger kan gjelde samme dag; som i appens kalender
+markeres den sist endrede (`lastUpdatedTime`) med `active: true` og
+`activeNoteId`, og ved likt tidspunkt vinner den første. Hver melding får
+`typeAbbreviation`, appens kode: forbokstavene i de tre første ordene i
+typenavnet, eller de tre første tegnene når navnet er ett ord. Appens kalender
+viser bare hverdager. Lesingen er live-verifisert mot appens visning.
 
 Skolefravær tar datoer som `YYYY-MM-DD` (begge dager inkludert).
 Ved sending konverteres siste fraværsdag til eksklusiv sluttdato dagen etter,

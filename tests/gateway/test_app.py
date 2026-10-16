@@ -192,7 +192,7 @@ def test_full_oauth_flyt_og_verktoykall(client):
     assert {"web_list_children", "message_contacts", "register_student_absence"} <= names
     assert {"absence_codes", "register_childcare_absence"} <= names
     assert {"send_message", "reply_message"} <= names
-    assert len(names) == 21
+    assert len(names) == 23
 
     res = _sse_json(_rpc(client, tok["access_token"], "tools/call",
                          {"name": "web_list_children", "arguments": {}}, id_=3, session=session))
@@ -210,7 +210,7 @@ def test_full_oauth_flyt_og_verktoykall(client):
 def test_api_token_virker(client):
     session = _mcp_session(client, API_TOKEN)
     tools = _sse_json(_rpc(client, API_TOKEN, "tools/list", {}, id_=2, session=session))
-    assert len(tools["result"]["tools"]) == 21
+    assert len(tools["result"]["tools"]) == 23
 
 
 @pytest.mark.parametrize("unknown", [False, True])

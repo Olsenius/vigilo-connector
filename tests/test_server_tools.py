@@ -14,6 +14,8 @@ EXPECTED = {
     "message_participants",
     "search_message_thread",
     "get_message_thread",
+    "list_pickup_notes",
+    "pickup_note_options",
     "read_message_attachments",
     "read_post_attachments",
     "api_get",

@@ -145,6 +145,29 @@ def message_participants(thread_uid: str, child_id: str, force_refresh: bool = F
                           ensure_ascii=False, indent=2)
 
 
+def list_pickup_notes(child_id: str, month: str | None = None, day: str | None = None) -> str:
+    """Hentemeldingar (SFO-hentebeskjedar) for eit barn i éin kalendermånad.
+
+    month er "YYYY-MM" (standard: inneverande månad i Europe/Oslo). day
+    ("YYYY-MM-DD") viser berre meldingar som gjeld den dagen, med active=true på
+    den som gjeld (sist endra, som i appen). typeAbbreviation er appens kode
+    (t.d. GHS). Vigilo viser berre kvardagar i kalenderen. Gir òg barnets
+    SFO-einingar (afterSchoolUnits). Utan SFO-eining blir ingenting henta frå Vigilo.
+    Berre lesing; canUpdate/canDelete viser kva appen ville tillate.
+    """
+    return _json(client().pickup_notes(child_id, month, day), ensure_ascii=False, indent=2)
+
+
+def pickup_note_options(child_id: str, organizational_unit_id: str) -> str:
+    """Kategoriar, meldingstypar og registreringsfristar for hentemeldingar.
+
+    organizational_unit_id må vere ei SFO-eining frå afterSchoolUnits i
+    list_pickup_notes. Berre lesing.
+    """
+    return _json(client().pickup_note_options(child_id, organizational_unit_id),
+                 ensure_ascii=False, indent=2)
+
+
 def read_message_attachments(thread_uid: str) -> str:
     """Last ned og les vedleggene i en meldingstråd (f.eks. ukeplan-PDF).
 
@@ -333,6 +356,8 @@ TOOLS = (
     message_participants,
     search_message_thread,
     get_message_thread,
+    list_pickup_notes,
+    pickup_note_options,
     read_message_attachments,
     read_post_attachments,
     api_get,

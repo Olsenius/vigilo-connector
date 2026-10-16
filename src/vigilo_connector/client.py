@@ -14,8 +14,9 @@ import threading
 import time
 from contextlib import contextmanager
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -152,15 +153,22 @@ class VigiloClient:
             connect=min(5.0, remaining), read=min(15.0, remaining),
             write=min(5.0, remaining), pool=min(5.0, remaining))}
 
-    def get(self, path: str, params: dict | None = None) -> httpx.Response:
-        """Rått GET-kall med auth og retry ved 401. Brukes også til kartlegging."""
+    def get(self, path: str, params: dict | None = None,
+            headers: dict[str, str] | None = None) -> httpx.Response:
+        """Rått GET-kall med auth og retry ved 401. Brukes også til kartlegging.
+
+        Ekstra headers gjelder bare dette endepunktet og kan ikke overstyre autentisering.
+        """
         if is_filestorage(path):
             return self._http.get(path, params=params, **self._read_options())
-        headers = self._headers()
-        r = self._http.get(path, params=params, headers=headers, **self._read_options())
+        extra = {k: v for k, v in (headers or {}).items()
+                 if k.lower() not in {"authorization", "appversion"}}
+        r = self._http.get(path, params=params, headers={**extra, **self._headers()},
+                           **self._read_options())
         if r.status_code == 401:
-            headers = self._headers(force_refresh=True)
-            r = self._http.get(path, params=params, headers=headers, **self._read_options())
+            r = self._http.get(path, params=params,
+                               headers={**extra, **self._headers(force_refresh=True)},
+                               **self._read_options())
         return r
 
     @contextmanager
@@ -173,9 +181,10 @@ class VigiloClient:
         finally:
             self._read_context.force_refresh = previous
 
-    def get_json(self, path: str, params: dict | None = None, *, force_refresh: bool = False):
+    def get_json(self, path: str, params: dict | None = None, *, force_refresh: bool = False,
+                 headers: dict[str, str] | None = None):
         def load():
-            r = self.get(path, params=params)
+            r = self.get(path, params=params, headers=headers)
             if r.status_code == 401:
                 raise AuthError("Fortsatt 401 etter token-fornyelse — kjør `vigilo-login` på nytt.")
             r.raise_for_status()
@@ -185,8 +194,9 @@ class VigiloClient:
         # Thread details stay live: the app revalidates them on every open, and
         # pages shift when a message arrives, so a fresh first page combined with
         # an older cached page could silently skip a message.
-        cacheable = (path in {"/api/children", "/api/message-threads"}
-                     or re.fullmatch(r"/api/message-threads/[^/]+/participants", path))
+        cacheable = not headers and (
+            path in {"/api/children", "/api/message-threads"}
+            or re.fullmatch(r"/api/message-threads/[^/]+/participants", path))
         if not cacheable:
             return load()
         self._read_options()
@@ -574,6 +584,145 @@ class VigiloClient:
             f"/api/message-threads/{quote(thread_uid, safe='')}/participants",
             params={"childPersonId": child_id},
         )
+
+    # --- Hentemeldingar (SFO) ------------------------------------------
+    # Kartlagt frå Android 3.3.0-4: appen viser hentemeldingar berre for barn
+    # med ei SFO-eining (type afterSchool) og hentar éin kalendermånad om gongen.
+
+    def _after_school_units(self, child_id: str) -> list[dict]:
+        if not isinstance(child_id, str) or not child_id.strip():
+            raise ValueError("child_id må vere utfylt.")
+        child = next((c for c in self.get_children()
+                      if isinstance(c, dict) and c.get("childId") == child_id), None)
+        if child is None:
+            raise ValueError("Fann ikkje barnet; bruk childId frå list_children.")
+        return [unit for unit in child.get("organizationalUnits") or []
+                if isinstance(unit, dict) and unit.get("type") == "afterSchool"]
+
+    @staticmethod
+    def _month_range(month: str | None) -> tuple[str, date, date]:
+        """Kalendermånad til appens periode: første dag og første dag neste månad."""
+        if month is None:
+            month = datetime.now(ZoneInfo("Europe/Oslo")).strftime("%Y-%m")
+        if not isinstance(month, str) or not re.fullmatch(r"\d{4}-\d{2}", month):
+            raise ValueError("month må ha format YYYY-MM.")
+        try:
+            start = date.fromisoformat(f"{month}-01")
+            end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        except (ValueError, OverflowError):
+            raise ValueError("month må vere ein gyldig månad på format YYYY-MM.") from None
+        return month, start, end
+
+    @staticmethod
+    def _pickup_abbreviation(name: str) -> str:
+        """Typekoden i appens kalender, t.d. «Går hjem selv …» -> GHS."""
+        words = [word for word in name.split(" ") if word.strip()]
+        if len(words) <= 1:
+            return name[:3].upper()
+        return "".join(word[0] for word in words[:3]).upper()
+
+    def pickup_notes(self, child_id: str, month: str | None = None,
+                     day: str | None = None) -> dict:
+        """Hentemeldingar for barnet i éin kalendermånad, som i appens månadsvising.
+
+        day (YYYY-MM-DD) hentar månaden for dagen og held berre på meldingar med
+        ein førekomst den dagen. Førekomstane er UTC-tidspunkt for midnatt i Oslo.
+        """
+        if day is not None:
+            if not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+                raise ValueError("day må ha format YYYY-MM-DD.")
+            try:
+                selected = date.fromisoformat(day)
+            except ValueError:
+                raise ValueError("day må vere ein gyldig dato på format YYYY-MM-DD.") from None
+            if month is not None and month != day[:7]:
+                raise ValueError("month og day må gjelde same månad.")
+            month = day[:7]
+        month, start, end = self._month_range(month)
+        units = self._after_school_units(child_id)
+        result = {
+            "childId": child_id, "month": month, "fromDate": start.isoformat(),
+            "toDateExclusive": end.isoformat(),
+            "afterSchoolUnits": [{"id": unit.get("id"), "name": unit.get("name")}
+                                 for unit in units],
+        }
+        if not units:
+            # Appen hentar ikkje hentemeldingar når barnet manglar SFO-eining.
+            result.update(notes=[], note="Barnet har inga SFO-eining; ingen hentemeldingar.")
+            return result
+        data = self.get_json("/api/check-in-notes", params={
+            "childPersonId": child_id, "fromDate": start.isoformat(), "toDate": end.isoformat(),
+        })
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("Ugyldig svar frå Vigilo for hentemeldingar.")
+        for note in items:
+            note_type = note.get("type") if isinstance(note, dict) else None
+            name = note_type.get("name") if isinstance(note_type, dict) else None
+            if isinstance(name, str):
+                note["typeAbbreviation"] = self._pickup_abbreviation(name)
+        if day is not None:
+            oslo = ZoneInfo("Europe/Oslo")
+            def occurs(note):
+                for value in note.get("dateOccurrences") or [] if isinstance(note, dict) else []:
+                    try:
+                        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    if moment.tzinfo is not None and moment.astimezone(oslo).date() == selected:
+                        return True
+                return False
+            result["day"] = day
+            items = [note for note in items if occurs(note)]
+            # Som appen: sist endra melding gjeld dagen; ved likt tidspunkt vinn den første.
+            def updated(note):
+                try:
+                    return datetime.fromisoformat(str(note.get("lastUpdatedTime")).replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+            winner = None
+            for note in items:
+                moment = updated(note)
+                if moment is not None and moment.tzinfo is not None and (
+                        winner is None or updated(winner) < moment):
+                    winner = note
+            for note in items:
+                note["active"] = note is winner
+            if winner is not None:
+                result["activeNoteId"] = winner.get("id")
+        result["notes"] = items
+        return result
+
+    def pickup_note_options(self, child_id: str, organizational_unit_id: str) -> dict:
+        """Aktiverte kategoriar, meldingstypar og registreringsfristar for ei SFO-eining."""
+        if not isinstance(organizational_unit_id, str) or not organizational_unit_id.strip():
+            raise ValueError("organizational_unit_id må vere utfylt.")
+        if not any(unit.get("id") == organizational_unit_id
+                   for unit in self._after_school_units(child_id)):
+            raise ValueError("organizational_unit_id må vere ei SFO-eining for barnet; "
+                             "sjå afterSchoolUnits i list_pickup_notes.")
+        config = self.get_json("/api/check-in-note-configuration",
+                               headers={"X-Organizational-Unit-Id": organizational_unit_id})
+        categories = config.get("enabledCategories") if isinstance(config, dict) else None
+        if not isinstance(categories, list) or not all(isinstance(c, str) for c in categories):
+            raise ValueError("Ugyldig konfigurasjonssvar frå Vigilo for hentemeldingar.")
+        # Appen hentar alle typar utan kategori og vel deretter konfigurasjon per kategori.
+        types = self.get_json("/api/check-in-note-types")
+        type_items = types.get("items") if isinstance(types, dict) else None
+        if not isinstance(type_items, list):
+            raise ValueError("Ugyldig svar frå Vigilo for typar hentemeldingar.")
+        return {
+            "childId": child_id, "organizationalUnitId": organizational_unit_id,
+            "enabledCategories": categories,
+            # Appens filtrering av typar er ikkje kartlagd; marker i staden kategorien.
+            "types": [{**t, "categoryEnabled": t.get("category") in categories}
+                      for t in type_items if isinstance(t, dict)],
+            "registrationDeadlines": [
+                self.get_json("/api/check-in-note-configuration/registration-deadlines", params={
+                    "organizationalUnitId": organizational_unit_id, "noteCategory": category,
+                }) for category in categories
+            ],
+        }
 
     # --- Web-foreldreportal ---------------------------------------------
     # Endepunkter kartlagt fra web-portalen (web-parent.prod.vigilo-oas.no),
