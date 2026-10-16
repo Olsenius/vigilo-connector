@@ -15,9 +15,8 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .client import SearchIncomplete, VigiloClient
+
 from .output import sanitize as _sanitize, thread_summary as _thread_summary, verified_child_context
-
-
 
 
 def _json(value, **kwargs):
@@ -32,9 +31,6 @@ def _anticipated_errors(fn):
         except (ValueError, SearchIncomplete) as error:
             raise ToolError(_sanitize(str(error))) from None
     return wrapper
-
-
-
 
 
 
@@ -54,48 +50,74 @@ def use_client(c: VigiloClient) -> None:
     _client = c
 
 
-def list_children() -> str:
-    """List barna knyttet til den innloggede foresatte, med childId."""
-    return _json(client().get_children(), ensure_ascii=False, indent=2)
+def list_children(force_refresh: bool = False) -> str:
+    """List barna knyttet til den innloggede foresatte, med childId.
+
+    Leseresponsar kan vere opptil 60 sekund gamle. force_refresh=true hentar på nytt."""
+    return _json(client().get_children(force_refresh=force_refresh), ensure_ascii=False, indent=2)
 
 
-def list_message_threads(child_id: str, page_size: Annotated[int, Field(ge=1, le=20)]=20, page_id: int | None=None, include_after_school: bool=True) -> str:
+def list_message_threads(
+    child_id: str, page_size: Annotated[int, Field(ge=1, le=20)] = 20, page_id: int | None = None,
+    include_after_school: bool = True, force_refresh: bool = False,
+) -> str:
     """En kompakt side ordinære meldingstråder med pageId og hasMore.
+
+    Leseresponsar kan vere opptil 60 sekund gamle. force_refresh=true hentar på nytt.
 
     Bruk page_id for flere sider. Åpne hver tråd for hele meldingsinnholdet;
     Listen viser inntil 200 tegn av siste melding. hasMore betyr full side;
-    neste side kan være tom. Inkluderer SFO som standard.
-
-    Standard er 20 trådar per side.
-"""
+    neste side kan være tom. Standard sidestørrelse er 20. Inkluderer SFO som standard.
+    """
     if type(page_size) is not int or not 1 <= page_size <= 20:
         raise ValueError("page_size må vere eit heiltal frå 1 til 20 for trådlista.")
-    page = client().get_message_threads_page(child_id, page_size, include_after_school, page_id)
-    threads = page.get('messageThreads', [])
-    summary = {key: value for key, value in page.items() if key != 'messageThreads'}
-    summary.update({'messageThreads': [_thread_summary(thread) for thread in threads], 'hasMore': len(threads) == page_size})
-    if len(threads) == page_size and type(page.get('pageId')) is int:
-        summary['nextPageId'] = page['pageId'] + 1
+    with client().fresh_reads(force_refresh):
+        page = client().get_message_threads_page(child_id, page_size, include_after_school, page_id)
+    threads = page.get("messageThreads", [])
+    summary = {key: value for key, value in page.items() if key != "messageThreads"}
+    summary.update({"messageThreads": [_thread_summary(thread) for thread in threads],
+                    "hasMore": len(threads) == page_size})
+    if len(threads) == page_size and type(page.get("pageId")) is int:
+        summary["nextPageId"] = page["pageId"] + 1
     return _json(summary, ensure_ascii=False, indent=2)
 
 
-def get_message_thread(thread_uid: str, page_size: int=50, page_id: int | None=None, child_id: str | None=None) -> str:
+def _verified_child(thread_uid: str, child_id: str, force_refresh: bool):
+    before = client().cached_reads()
+    with client().fresh_reads(force_refresh):
+        try:
+            return verified_child_context(client(), thread_uid, child_id)
+        except ValueError:
+            if client().cached_reads() == before:
+                raise  # Every list read was live; retrying would only repeat it.
+    # Cached lists may predate a new thread; confirm the miss against fresh lists.
+    with client().fresh_reads():
+        return verified_child_context(client(), thread_uid, child_id)
+
+
+def get_message_thread(
+    thread_uid: str, page_size: int = 50, page_id: int | None = None,
+    child_id: str | None = None, force_refresh: bool = False,
+) -> str:
     """En side meldinger med vedlegg og svar-/slettestatus, uten å markere lest.
 
+    Meldingane blir alltid henta ferske frå Vigilo.
 
     child_id verifiserer barnet frå barnelista og trådens medlemskap via barnets
-    paginerte trådliste. Utan child_id blir det tvetydige child-feltet utelate.
+    paginerte trådliste. Lister kan vere opptil 60 sekund gamle; ved manglande
+    treff blir dei henta på nytt før feil. force_refresh=true hentar listene ferske
+    med ein gong. Utan child_id blir det tvetydige child-feltet utelate.
     For eldre meldinger: bruk returnert pageId + 1 som page_id inntil tom side.
     """
     selected = None
     if child_id is not None:
-        selected = verified_child_context(client(), thread_uid, child_id)
+        selected = _verified_child(thread_uid, child_id, force_refresh)
     detail = dict(client().get_thread(thread_uid, page_size, page_id))
-    if selected is not None and detail.get('threadUid') != thread_uid:
-        raise ValueError('Detaljresponsen samsvarar ikkje med valt tråd.')
-    detail.pop('child', None)
+    if selected is not None and detail.get("threadUid") != thread_uid:
+        raise ValueError("Detaljresponsen samsvarar ikkje med valt tråd.")
+    detail.pop("child", None)
     if selected is not None:
-        detail['child'] = selected
+        detail["child"] = selected
     return _json(detail, ensure_ascii=False, indent=2)
 
 
@@ -114,12 +136,13 @@ def search_message_thread(
     ), ensure_ascii=False, indent=2)
 
 
+def message_participants(thread_uid: str, child_id: str, force_refresh: bool = False) -> str:
+    """Deltakere og trådstarter for en ordinær tråd og valgt barn.
 
-
-def message_participants(thread_uid: str, child_id: str) -> str:
-    """Deltakere og trådstarter for en ordinær tråd og valgt barn."""
-    return _json(client().message_participants(thread_uid, child_id),
-                      ensure_ascii=False, indent=2)
+    Leseresponsar kan vere opptil 60 sekund gamle. force_refresh=true hentar på nytt."""
+    with client().fresh_reads(force_refresh):
+        return _json(client().message_participants(thread_uid, child_id),
+                          ensure_ascii=False, indent=2)
 
 
 def read_message_attachments(thread_uid: str) -> str:
@@ -159,7 +182,6 @@ def api_get(path: str, params_json: str = "{}") -> str:
     except ValueError:
         pass
     return f"HTTP {r.status_code}\n{body[:20000]}"
-
 
 
 # --- Web-foreldreportal -------------------------------------------------
@@ -226,7 +248,6 @@ def web_api_get(path: str, params_json: str = "{}") -> str:
     except ValueError:
         pass
     return f"HTTP {r.status_code}\n{body[:20000]}"
-
 
 
 def message_contacts(child_id: str, organizational_unit_id: str) -> str:

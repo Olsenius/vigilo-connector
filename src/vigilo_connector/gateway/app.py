@@ -76,7 +76,6 @@ def _friendly_errors(fn, setup_url: str):
     return wrapper
 
 
-
 def create_app(settings: Settings, public_url: str, vigilo_client=None):
     from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
     from mcp.server.mcpserver import MCPServer

@@ -1,4 +1,5 @@
 import base64
+from contextlib import contextmanager
 import hashlib
 import json
 import re
@@ -25,6 +26,12 @@ MCP_HEADERS = {"accept": "application/json, text/event-stream", "content-type": 
 class FakeVigilo:
     def __init__(self):
         self.fail = False
+        self.refresh_requests = []
+
+    @contextmanager
+    def fresh_reads(self, force_refresh=True):
+        self.refresh_requests.append(force_refresh)
+        yield
 
     def send_message(self, *args):
         if self.fail:
@@ -359,3 +366,29 @@ def test_message_discovery_through_gateway(client, name, args, expected):
     }, id_=3, session=session))["result"]
     assert result.get("isError") is not True
     assert json.loads(result["content"][0]["text"]) == expected
+
+
+@pytest.mark.parametrize("name,args", [
+    ("list_message_threads", {"child_id": "test-child"}),
+    ("message_participants", {"thread_uid": "test-thread", "child_id": "test-child"}),
+])
+@pytest.mark.parametrize("force_refresh", [False, True])
+def test_cached_reads_pass_force_refresh_through_gateway(client, fake, name, args, force_refresh):
+    session = _mcp_session(client, API_TOKEN)
+    result = _sse_json(_rpc(client, API_TOKEN, "tools/call", {
+        "name": name, "arguments": {**args, "force_refresh": force_refresh},
+    }, id_=3, session=session))["result"]
+    assert result.get("isError") is not True
+    assert fake.refresh_requests == [force_refresh]
+
+
+def test_live_detail_and_search_do_not_offer_cache_bypass(client, fake):
+    session = _mcp_session(client, API_TOKEN)
+    tools = {tool["name"]: tool for tool in _sse_json(
+        _rpc(client, API_TOKEN, "tools/list", {}, id_=2, session=session))["result"]["tools"]}
+    assert "force_refresh" not in tools["search_message_thread"]["inputSchema"]["properties"]
+    result = _sse_json(_rpc(client, API_TOKEN, "tools/call", {
+        "name": "get_message_thread", "arguments": {"thread_uid": "test-thread"},
+    }, id_=3, session=session))["result"]
+    assert result.get("isError") is not True
+    assert fake.refresh_requests == []

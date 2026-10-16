@@ -56,6 +56,14 @@ def test_list_then_selected_thread_paging_never_reads_other_threads(wire, real_c
     assert calls[1][2].get('pageId') is None
     assert calls[2][2]['pageId'] == '1'
     assert all(item[2]['pageSize'] == '3' for item in calls[1:])
+    # Thread details are never cached; the list is cached until force_refresh.
+    payload(wire('get_message_thread', {'thread_uid': 'test-chosen', 'page_size': 3}))
+    assert len(calls) == 4
+    payload(wire('list_message_threads', {'child_id': 'test-child', 'page_size': 2}))
+    assert len(calls) == 4
+    payload(wire('list_message_threads', {'child_id': 'test-child', 'page_size': 2,
+                                          'force_refresh': True}))
+    assert len(calls) == 5
 
 
 def test_single_thread_search_pages_only_selected_id(wire, real_client):

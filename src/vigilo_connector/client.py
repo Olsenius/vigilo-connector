@@ -7,19 +7,19 @@ MCP-verktøyet `api_get` til å utforske.
 """
 
 import io
+import hashlib
+import json
 import math
-import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
 from contextlib import contextmanager
 import re
-from datetime import date, datetime, time as datetime_time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, timedelta
 from urllib.parse import quote
 
 import httpx
 
+from .read_cache import ReadCache
 from .auth import AuthError, AuthLockTimeout, TokenStore, auth_budget, user_id_from_jwt
 from .http_logging import LoggedClient, logged_get
 from .config import API_BASE, APP_VERSION, WEB_API_BASE
@@ -32,40 +32,6 @@ class WriteOutcomeUnknown(RuntimeError):
 
 class SearchIncomplete(RuntimeError):
     """Forventet ufullstendig søk; trygt å vise uten serverinnhold."""
-
-
-def _oslo_today() -> date:
-    return datetime.now(ZoneInfo("Europe/Oslo")).date()
-
-
-def _search_window(since: str | None) -> tuple[str, datetime]:
-    if since is None:
-        today = _oslo_today()
-        start = date(today.year if today.month >= 8 else today.year - 1, 8, 1)
-    else:
-        if not isinstance(since, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", since):
-            raise ValueError("since må vere ein ISO-dato: YYYY-MM-DD.")
-        try:
-            start = date.fromisoformat(since)
-        except ValueError:
-            raise ValueError("since må vere ein gyldig ISO-dato: YYYY-MM-DD.") from None
-    return start.isoformat(), datetime.combine(start, datetime_time.min, ZoneInfo("Europe/Oslo"))
-
-
-def _message_time(value) -> datetime:
-    # fromisoformat normaliserer til dømes +00:60; kontroller offset før parsing.
-    if not isinstance(value, str):
-        raise ValueError("Manglande timeCreated.")
-    match = re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?P<offset>[Zz]|[+-]\d{2}:\d{2})",
-        value,
-    )
-    if match is None:
-        raise ValueError("timeCreated må ha dato, klokkeslett og eksplisitt tidssone.")
-    offset = match.group("offset")
-    if offset.upper() != "Z" and (int(offset[1:3]) > 23 or int(offset[4:6]) > 59):
-        raise ValueError("Ugyldig tidssone i timeCreated.")
-    return datetime.fromisoformat(value.replace("t", "T").replace("z", "Z"))
 
 
 def _absence_dates(from_date: str, to_date: str) -> tuple[str, str]:
@@ -123,6 +89,7 @@ def _attachment_to_text(data: bytes, mime: str, name: str | None) -> str | None:
 class VigiloClient:
     def __init__(self, store: TokenStore | None = None):
         self._read_context = threading.local()
+        self._read_cache = ReadCache()
         self._store = store or TokenStore()
         self._http = android_client(API_BASE, app_api=True)
         self._web = LoggedClient(origin="web", base_url=WEB_API_BASE, timeout=30)
@@ -172,7 +139,6 @@ class VigiloClient:
             yield
         finally:
             self._read_context.budget = previous
-            self._read_context.first_list = False
 
     def _read_options(self):
         budget = getattr(self._read_context, "budget", None)
@@ -182,11 +148,6 @@ class VigiloClient:
         remaining = deadline - time.monotonic()
         if stopped.is_set() or remaining <= 0:
             raise SearchIncomplete("Tidsbudsjettet er brukt opp; søket er ikkje komplett.")
-        if getattr(self._read_context, "first_list", False):
-            connect = min(5.0, remaining / 4)
-            return {"timeout": httpx.Timeout(
-                connect=connect, read=min(15.0, remaining - connect),
-                write=min(1.0, remaining / 20), pool=min(1.0, remaining / 20))}
         return {"timeout": httpx.Timeout(
             connect=min(5.0, remaining), read=min(15.0, remaining),
             write=min(5.0, remaining), pool=min(5.0, remaining))}
@@ -202,12 +163,46 @@ class VigiloClient:
             r = self._http.get(path, params=params, headers=headers, **self._read_options())
         return r
 
-    def get_json(self, path: str, params: dict | None = None):
-        r = self.get(path, params=params)
-        if r.status_code == 401:
-            raise AuthError("Fortsatt 401 etter token-fornyelse — kjør `vigilo-login` på nytt.")
-        r.raise_for_status()
-        return r.json()
+    @contextmanager
+    def fresh_reads(self, force_refresh: bool = True):
+        """Bypass response reuse, including nested reads on this thread."""
+        previous = getattr(self._read_context, "force_refresh", False)
+        self._read_context.force_refresh = previous or force_refresh
+        try:
+            yield
+        finally:
+            self._read_context.force_refresh = previous
+
+    def get_json(self, path: str, params: dict | None = None, *, force_refresh: bool = False):
+        def load():
+            r = self.get(path, params=params)
+            if r.status_code == 401:
+                raise AuthError("Fortsatt 401 etter token-fornyelse — kjør `vigilo-login` på nytt.")
+            r.raise_for_status()
+            return r.json()
+
+        # Deliberately exclude exploration, authentication, web and file endpoints.
+        # Thread details stay live: the app revalidates them on every open, and
+        # pages shift when a message arrives, so a fresh first page combined with
+        # an older cached page could silently skip a message.
+        cacheable = (path in {"/api/children", "/api/message-threads"}
+                     or re.fullmatch(r"/api/message-threads/[^/]+/participants", path))
+        if not cacheable:
+            return load()
+        self._read_options()
+        identity = hashlib.sha256(self._access_token().encode()).hexdigest()
+        key = (identity, path, json.dumps(params or {}, sort_keys=True, separators=(",", ":")))
+        bypass = force_refresh or getattr(self._read_context, "force_refresh", False)
+        loaded = []
+        value = self._read_cache.read(key, lambda: loaded.append(True) or load(),
+                                      bypass=bypass, check=self._read_options)
+        if not loaded:
+            self._read_context.cached_reads = self.cached_reads() + 1
+        return value
+
+    def cached_reads(self) -> int:
+        """Responses this thread has received without its own HTTP request."""
+        return getattr(self._read_context, "cached_reads", 0)
 
     def web_get(self, path: str, params: dict | None = None) -> httpx.Response:
         """Rått GET mot web-foreldreportalen med auth og retry ved 401."""
@@ -240,6 +235,8 @@ class VigiloClient:
         """
         if method not in {"POST", "PUT", "DELETE"}:
             raise ValueError("Skriveverb må være POST, PUT eller DELETE.")
+        # Invalidate before and after every attempted write, even an unknown outcome.
+        self._read_cache.clear()
         def request(force_refresh: bool = False) -> httpx.Response:
             request_headers = {k: v for k, v in (headers or {}).items()
                                if k.lower() not in {"authorization", "appversion"}}
@@ -255,9 +252,11 @@ class VigiloClient:
             if response.status_code == 401 and retry_401:
                 response = request(force_refresh=True)
         except httpx.TransportError:
+            self._read_cache.clear()
             raise WriteOutcomeUnknown(
                 f"Ukjent resultat: {outcome} før et nytt forsøk; ikke send automatisk på nytt."
             ) from None
+        self._read_cache.clear()
         correlation_id = response.headers.get("X-Correlation-Id", "")
         correlation = (f" Korrelasjons-ID: {correlation_id}."
                        if re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", correlation_id) else "")
@@ -372,8 +371,8 @@ class VigiloClient:
             "recipients": selected,
         }
 
-    def get_children(self) -> list:
-        data = self.get_json("/api/children")
+    def get_children(self, *, force_refresh: bool = False) -> list:
+        data = self.get_json("/api/children", force_refresh=force_refresh)
         return data if isinstance(data, list) else data.get("items", [])
 
     def _post_message(self, path: str, payload: dict) -> None:
@@ -494,7 +493,7 @@ class VigiloClient:
         with self._search_reads(deadline, stopped):
             return self._search_message_thread(thread_uid, query, page_size, max_pages, timeout_s)
 
-    def _search_message_thread(self, thread_uid, query, page_size, max_pages, timeout_s, since_cutoff=None):
+    def _search_message_thread(self, thread_uid, query, page_size, max_pages, timeout_s):
         if not isinstance(thread_uid, str) or not thread_uid.strip() or thread_uid in (".", ".."):
             raise ValueError("thread_uid må vere ein gyldig ID.")
         if not isinstance(query, str) or not query.strip():
@@ -548,18 +547,10 @@ class VigiloClient:
                 if (not isinstance(message, dict) or not isinstance(message.get("id"), str)
                         or not message["id"] or not isinstance(message.get("body"), str)):
                     raise incomplete("Ugyldig melding.")
-                timestamp = None
-                if since_cutoff is not None:
-                    try:
-                        timestamp = _message_time(message.get("timeCreated"))
-                    except (ValueError, OverflowError):
-                        raise incomplete("Ugyldig eller manglande timeCreated i melding.") from None
                 if message["id"] in seen_messages:
                     continue
                 seen_messages.add(message["id"])
                 new_messages += 1
-                if since_cutoff is not None and timestamp < since_cutoff:
-                    continue
                 messages_scanned += 1
                 attachments = message.get("attachments") or []
                 if (not isinstance(attachments, list)
@@ -764,5 +755,6 @@ class VigiloClient:
         return out
 
     def close(self) -> None:
+        self._read_cache.close()
         self._http.close()
         self._web.close()

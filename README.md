@@ -335,6 +335,20 @@ Ugyldig paging, manglende tilknytning og sidegrense gir feil. Uten `child_id`
 utelates detaljresponsens tvetydige `child`; gruppemedlemmer utledes ikke.
 Ingen av disse lesekallene markerer tråden som lest.
 
+Barnelisten, trådlisten og deltakeroppslag gjenbrukes i prosessminnet i opptil
+60 sekunder (høyst 512 svar og 8 MiB), adskilt per tilgangstoken, sti og
+query. Like samtidige kall deler én forespørsel; feil lagres ikke, og et kall
+som venter på et annet kall som feiler, henter selv. `list_children`,
+`list_message_threads`, `message_participants` og barneverifiseringen i
+`get_message_thread` tar `force_refresh=true`, som henter bare de berørte svarene
+på nytt. Meldingsdetaljer og `search_message_thread` hentes alltid ferske:
+appen henter detaljer på nytt ved hver åpning, og sidene forskyves når nye
+meldinger kommer. Finner ikke barneverifiseringen tråden i bufrede lister,
+hentes listene ferske før feil. Alle skriveforsøk tømmer bufferen før og
+etter kallet, også ved ukjent utfall. Utløpte svar fjernes av en tidtaker,
+ikke bare ved neste lesing. Endringer gjort andre steder, f.eks. i appen,
+kan være usynlige i listene i opptil 60 sekunder.
+
 `search_message_thread(thread_uid, query)` søker bokstavelig uten skille på
 store/små bokstaver i meldingstekst og vedleggsnavn i én valgt tråd.
 Finn først tråd-ID og forhåndsvisning med `list_message_threads`, og hent
