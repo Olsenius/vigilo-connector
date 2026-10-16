@@ -262,9 +262,11 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 
 | Verktøy | Gjør |
 |---|---|
-| `web_list_children` | Barna dine med `childId` **og** `organizationalUnitId` (skole/klasse) |
+| `web_list_children` | Én rad per barn/enhet, med stabile ID-er, enhetstype og alle grupper (også SFO) |
 | `list_children` | Barna via app-gatewayen (kun `childId`) |
-| `list_message_threads` / `get_message_thread` | Beskjedtråder og meldinger (app-gateway) |
+| `list_message_threads` / `get_message_thread` | Én side tråder/meldinger med `pageId` og tilstandsflagg (app-gateway) |
+| `search_message_thread` | Søk i meldingssider i éin eksplisitt vald tråd |
+| `message_participants` | Deltakere og trådstarter for valgt barn og ordinær tråd |
 | `read_message_attachments` | Last ned og les vedlegg i en meldingstråd (PDF/docx→tekst) |
 | `read_post_attachments` | Last ned og les vedlegg i et oppslag/«Siste nytt» (PDF/docx→tekst) — her ligger ofte ukeplanen |
 | `news_feed` | «Siste nytt» / oppslag for et barn |
@@ -288,12 +290,84 @@ Meldingssending krever at brukeren har bestilt konkret innhold og mottakere.
 `recipients` fra `message_contacts`. Mottakere sjekkes mot barnets kontaktliste,
 og minst én lærer/administrasjon (`employee`) kreves. `reply_message` tar
 `thread_uid` fra en ordinær meldingstråd og `body`; fraværstråder støttes ikke.
-Begge sender uten vedlegg. Ved timeout eller HTTP 5xx kan meldingen være sendt:
+Tittel og meldingstekst kan ikke være blanke. Gruppene i kontaktlisten viser
+individuelle ansattmottakere som kan velges; gruppe-ID sendes ikke som mottaker.
+På wire legger connectoren automatisk til barnet først som
+`{"type":"client","externalId":child_id}`, slik appens use-case og type-mapper
+gjør. Dette er barnets trådkontekst, ikke en bruker valgt mottakertype.
+Alle mottakere dedupliseres på kontakt-ID, som i appens mapper.
+Ingen sikker maksimumslengde for teksten er funnet i den lokale APK-analysen;
+vi finner derfor ikke på en lokal grense. Vedlegg er fortsatt ikke støttet.
+Før svar hentes ordinære tråddetaljer. `threadUid` må stemme og
+`isReplyDisabled` må være eksplisitt `false`; manglende status avviser sending.
+Slettede tråder avvises også som en forsiktig connectorregel: appen viser
+slettestatus, men separat svarblokk på dette flagget er ikke påvist.
+Kontrollen kan ikke utelukke at servertilstand endres etter oppslaget.
+Ved timeout eller HTTP 5xx kan meldingen være sendt:
 les meldingstrådene før et nytt forsøk. Bare eksplisitt HTTP 401 gir ett nytt
 forsøk med fornyet token. Begge verktøy er kontrakttestet med mock-transport.
 Svar i en eksisterende tråd er også live-verifisert gjennom gatewayen, med
 tilbake-lesing som bekreftet den sendte teksten. Oppretting av en ny meldingstråd
-er foreløpig kun kontrakttestet.
+er foreløpig kun kontrakttestet. Barn/eininger, listepaging, søk i en eldre melding i én tråd og deltakeroppslag
+er manuelt verifisert via remote MCP. Nye svarforkontroller er ikke live-testet.
+Manuell test avdekket maskerte grensefeil og for lav standard trådgrense for
+globalt søk; rettingene nedenfor venter ny manuell verifisering.
+
+`list_message_threads` returnerer nå et objekt med `messageThreads` og rå
+`pageId` i stedet for en løs liste. `page_size` og `page_id` kan brukes på både
+trådlisten og `get_message_thread`. Detaljsider hentes i appen med returnert
+`pageId + 1`, inntil tom side. Listepaging er påvist i appens `fetchPaged`:
+første side uten `pageId`, deretter `pageId + 1` mens antall tråder er lik
+sidestørrelsen. Denne progresjonen er nå statisk verifisert i REA/smali og
+mocktestet og manuelt verifisert for trådlisten.
+Listen viser `lastMessage.snippet` med høyst 200 tegn, kompakt `threadStarter` og `lastMessage.sender`
+(`id`, `name`, `communicatorType`), og eksisterende trådfelt. Full tekst hentes
+med `get_message_thread`. `hasMore` betyr at siden er full, som i appens
+videreføringsregel; neste side kan fortsatt være tom. `nextPageId` oppgis
+når siden er full og returnert `pageId` er gyldig. SFO er inkludert i listen som standard.
+`message_participants(thread_uid, child_id)` beholder rå deltakerfelt.
+Ingen av disse lesekallene markerer tråden som lest.
+
+`search_message_thread(thread_uid, query)` søkjer berre i den valde tråden.
+Globalt søk på tvers av alle trådar er fjerna. Hent først `list_message_threads`
+for ID, tittel og utdrag; bruk så `get_message_thread` for vald tråd og side.
+Dette imaget byggjer på førre godkjende kjelde og inneheld ikkje den lokale
+cache-kandidaten som framleis er til gjennomgang.
+
+HTTP-metadata kan slåast på med `VIGILO_HTTP_LOG=1` i gatewaymiljøet.
+Standard er av. Loggen går som éi JSON-linje per request, response eller feil
+til stderr (tilgjengeleg gjennom containerloggen), òg for stdio utan ekstra
+loggoppsett. Linjene inneheld tilfeldig lokal `callId`, metode, trygg
+rutemal, kategori (`app`, `web`, `oauth`, `attachment`), HTTP-status og
+`elapsedMs` ved respons/feil; feil får berre ein trygg klasse, aldri feilteksten.
+Response-tida blir målt når headers er mottekne; sein transportfeil under
+bodylesing får ei eiga feillinje med same ID.
+Alle app-/OAuth-kall via `android_client`, web-API-kall, filestorage,
+eksterne meldingsvedlegg og browser-authorize frå cookies er omfatta.
+Web-oppslagsvedlegg bruker webklienten og blir logga som `web`.
+Interne Tailscale-kall og innkomande MCP-/OAuth-klienttrafikk er ikkje
+Vigilo-kall og blir ikkje logga av denne funksjonen.
+Headerverdiar, cookies, tokens, queryverdiar, person-/objekt-ID-ar,
+signerte URL-ar, requestbody og responsebody blir aldri tekne med.
+Ukjende ruter får berre `/{redacted}`; vedleggsruter får ein generisk mal.
+Når metadatalogging er på, blir rå `httpx`-/`httpcore`-loggar undertrykte,
+fordi dei kan skrive heile URL-ar ved INFO/DEBUG i andre vertsapplikasjonar.
+Logging les ikkje responsebody og endrar ikkje headers, retries eller
+redirectpolicy. Feil i loggutgangen stoppar ikkje API-kallet.
+
+Alle JSON-svar fra MCP-verktøyene filtrerer profilbildefeltene `profilePicture`
+og `profilePictureDto` rekursivt og erstatter dem med `hasProfilePicture`.
+Dette omfatter råverktøyene `api_get` og `web_api_get`. Signerte profilbilde-URL-er
+returneres ikke. Vedleggs-URL-er beholdes fordi vedleggslesing trenger dem.
+
+Felles skrivetransport støtter POST, PUT og DELETE med eller uten JSON-body
+og med headers per operasjon. Nye operasjoner får ingen automatisk 401-retry;
+de fire eksisterende skriveoperasjonene beholder ett forsøk etter eksplisitt
+401 og tokenfornyelse. Ingen skrivekall følger redirects eller spilles av på
+nytt etter transportfeil, 3xx eller 5xx; utfallet regnes da som ukjent.
+Feilmeldinger viser HTTP-status og et
+formatbegrenset `X-Correlation-Id` når tilgjengelig, aldri responsinnhold.
+Nye brukerrettede skrivehandlinger utover de fire eksisterende er ikke lagt til.
 
 Skolefravær tar datoer som `YYYY-MM-DD` (begge dager inkludert).
 Ved sending konverteres siste fraværsdag til eksklusiv sluttdato dagen etter,
@@ -361,3 +435,11 @@ Base `https://web-parent.prod.vigilo-oas.no`, alle GET, Bearer-auth:
 Vurderings-/karakter-endepunktet laster først etter valg av skoleår/termin i
 Vurdering-fanen og er ikke kartlagt ennå — sniff det med `web_api_get`. Nye
 endepunkter legges inn i `client.py` og eksponeres i `server.py`.
+
+Runde 4: signerte Azure Blob-lenkjer blir fjerna frå alle verktøysvar. Vedlegg
+blir viste med id, namn og MIME; bruk vedleggsleseverktøyet for innhald.
+get_message_thread tek valfri child_id og verifiserer barn og trådtilknyting
+før child blir returnert. Utan child_id blir child-feltet utelate.
+Trådlista skil threadStarter frå lastMessage.sender.
+
+Standard list_message_threads er 20 trådar per side; detaljsider brukar framleis 50.

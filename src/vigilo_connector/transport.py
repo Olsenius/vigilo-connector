@@ -9,6 +9,8 @@ from http.cookiejar import CookieJar, DefaultCookiePolicy
 
 import httpx
 
+from .http_logging import LoggedClient
+
 ANDROID_USER_AGENT = "okhttp/4.10.0"
 JSON_CONTENT_TYPE = "application/json; charset=UTF-8"
 ANDROID_TIMEOUT = httpx.Timeout(10, connect=100, read=100)
@@ -33,7 +35,7 @@ def android_client(
 ) -> httpx.Client:
     """HTTP/2 med HTTP/1.1-fallback, gzip og ingen persisterte cookies.
 
-    POST-kall overstyrer redirect-policy slik at en skrivehandling ikke spilles
+    Skrivekall overstyrer redirect-policy slik at en skrivehandling ikke spilles
     av på nytt via 307/308. Transporten har ingen automatiske retries.
     """
     def prepare(request: httpx.Request) -> None:
@@ -50,7 +52,8 @@ def android_client(
                 # Lokal sesjonsmarkør i Android. Ingen userId-query på wire.
                 request.url = request.url.copy_remove_param("userId")
 
-    client = httpx.Client(
+    client = LoggedClient(
+        origin="app" if app_api else "oauth",
         base_url=base_url, http2=True, follow_redirects=True,
         max_redirects=20, timeout=ANDROID_TIMEOUT,
         headers={"User-Agent": ANDROID_USER_AGENT},

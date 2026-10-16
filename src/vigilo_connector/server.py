@@ -5,11 +5,38 @@ kartleggingsverktøyet: rått GET mot vilkårlig sti bak gatewayen, så nye
 endepunkter kan utforskes rett fra agenten før de blir egne verktøy.
 """
 
+import functools
 import json
+from typing import Annotated
+
+from pydantic import Field
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
-from .client import VigiloClient
+from .client import SearchIncomplete, VigiloClient
+from .output import sanitize as _sanitize, thread_summary as _thread_summary, verified_child_context
+
+
+
+
+def _json(value, **kwargs):
+    return json.dumps(_sanitize(value), **kwargs)
+
+
+def _anticipated_errors(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ValueError, SearchIncomplete) as error:
+            raise ToolError(_sanitize(str(error))) from None
+    return wrapper
+
+
+
+
+
 
 _client: VigiloClient | None = None
 
@@ -29,22 +56,70 @@ def use_client(c: VigiloClient) -> None:
 
 def list_children() -> str:
     """List barna knyttet til den innloggede foresatte, med childId."""
-    return json.dumps(client().get_children(), ensure_ascii=False, indent=2)
+    return _json(client().get_children(), ensure_ascii=False, indent=2)
 
 
-def list_message_threads(child_id: str, page_size: int = 50) -> str:
-    """List beskjedtråder for et barn (bruk childId fra list_children).
+def list_message_threads(child_id: str, page_size: Annotated[int, Field(ge=1, le=20)]=20, page_id: int | None=None, include_after_school: bool=True) -> str:
+    """En kompakt side ordinære meldingstråder med pageId og hasMore.
 
-    Returnerer tråder med threadUid, tittel, avsender og tidspunkt.
+    Bruk page_id for flere sider. Åpne hver tråd for hele meldingsinnholdet;
+    Listen viser inntil 200 tegn av siste melding. hasMore betyr full side;
+    neste side kan være tom. Inkluderer SFO som standard.
+
+    Standard er 20 trådar per side.
+"""
+    if type(page_size) is not int or not 1 <= page_size <= 20:
+        raise ValueError("page_size må vere eit heiltal frå 1 til 20 for trådlista.")
+    page = client().get_message_threads_page(child_id, page_size, include_after_school, page_id)
+    threads = page.get('messageThreads', [])
+    summary = {key: value for key, value in page.items() if key != 'messageThreads'}
+    summary.update({'messageThreads': [_thread_summary(thread) for thread in threads], 'hasMore': len(threads) == page_size})
+    if len(threads) == page_size and type(page.get('pageId')) is int:
+        summary['nextPageId'] = page['pageId'] + 1
+    return _json(summary, ensure_ascii=False, indent=2)
+
+
+def get_message_thread(thread_uid: str, page_size: int=50, page_id: int | None=None, child_id: str | None=None) -> str:
+    """En side meldinger med vedlegg og svar-/slettestatus, uten å markere lest.
+
+
+    child_id verifiserer barnet frå barnelista og trådens medlemskap via barnets
+    paginerte trådliste. Utan child_id blir det tvetydige child-feltet utelate.
+    For eldre meldinger: bruk returnert pageId + 1 som page_id inntil tom side.
     """
-    return json.dumps(
-        client().get_message_threads(child_id, page_size), ensure_ascii=False, indent=2
-    )
+    selected = None
+    if child_id is not None:
+        selected = verified_child_context(client(), thread_uid, child_id)
+    detail = dict(client().get_thread(thread_uid, page_size, page_id))
+    if selected is not None and detail.get('threadUid') != thread_uid:
+        raise ValueError('Detaljresponsen samsvarar ikkje med valt tråd.')
+    detail.pop('child', None)
+    if selected is not None:
+        detail['child'] = selected
+    return _json(detail, ensure_ascii=False, indent=2)
 
 
-def get_message_thread(thread_uid: str) -> str:
-    """Hent alle meldingene i en tråd, inkl. vedleggs-URL-er."""
-    return json.dumps(client().get_thread(thread_uid), ensure_ascii=False, indent=2)
+def search_message_thread(
+    thread_uid: str, query: str, page_size: int = 50, max_pages: int = 100,
+    timeout_s: float = 45.0,
+) -> str:
+    """Søk i alle meldingers tekst og vedleggsnavn i én ordinær tråd.
+
+    Bokstavelig søk uten skille på store/små bokstaver. Henter eldre sider
+    til tom side, uten å markere lest. Søker ikke inne i selve vedleggsfilene.
+    Ved sidegrense eller ugyldig paging gis feil, ikke et ufullstendig treffsett.
+    """
+    return _json(client().search_message_thread(
+        thread_uid, query, page_size, max_pages, timeout_s,
+    ), ensure_ascii=False, indent=2)
+
+
+
+
+def message_participants(thread_uid: str, child_id: str) -> str:
+    """Deltakere og trådstarter for en ordinær tråd og valgt barn."""
+    return _json(client().message_participants(thread_uid, child_id),
+                      ensure_ascii=False, indent=2)
 
 
 def read_message_attachments(thread_uid: str) -> str:
@@ -54,7 +129,7 @@ def read_message_attachments(thread_uid: str) -> str:
     (hasAttachments/attachments) og du trenger innholdet — typisk ukeplanen med
     lekser, turer og «ta med»-beskjeder som ofte legges ved som PDF.
     """
-    return json.dumps(
+    return _json(
         client().read_thread_attachments(thread_uid), ensure_ascii=False, indent=2
     )
 
@@ -66,7 +141,7 @@ def read_post_attachments(post_id: str) -> str:
     (f.eks. «uke 36-38»), IKKE som en meldingstråd. Bruk `id`-feltet fra
     `news_feed` som post_id. Returnerer utdratt tekst per vedlegg.
     """
-    return json.dumps(client().read_post_attachments(post_id), ensure_ascii=False, indent=2)
+    return _json(client().read_post_attachments(post_id), ensure_ascii=False, indent=2)
 
 
 def api_get(path: str, params_json: str = "{}") -> str:
@@ -78,12 +153,13 @@ def api_get(path: str, params_json: str = "{}") -> str:
     """
     params = json.loads(params_json)
     r = client().get(path, params=params)
-    body = r.text
+    body = _sanitize(r.text)
     try:
-        body = json.dumps(r.json(), ensure_ascii=False, indent=2)
+        body = _json(r.json(), ensure_ascii=False, indent=2)
     except ValueError:
         pass
     return f"HTTP {r.status_code}\n{body[:20000]}"
+
 
 
 # --- Web-foreldreportal -------------------------------------------------
@@ -92,17 +168,17 @@ def api_get(path: str, params_json: str = "{}") -> str:
 
 
 def web_list_children() -> str:
-    """List barna med childId og organizationalUnitId (flatet ut).
+    """List én rad per barn/enhet med childId, organizationalUnitId og type.
 
     organizationalUnitId (skole/klasse) trengs til timeplan, samtykke og
     vurdering; childId brukes overalt. Gir også skole- og gruppenavn.
     """
-    return json.dumps(client().children(), ensure_ascii=False, indent=2)
+    return _json(client().children(), ensure_ascii=False, indent=2)
 
 
 def news_feed(child_id: str, from_date: str = "", to_date: str = "") -> str:
     """Oppslag/«Siste nytt» for et barn. Datoer YYYY-MM-DD (default: siste 30 dager)."""
-    return json.dumps(
+    return _json(
         client().news_feed(child_id, from_date or None, to_date or None),
         ensure_ascii=False, indent=2,
     )
@@ -110,19 +186,19 @@ def news_feed(child_id: str, from_date: str = "", to_date: str = "") -> str:
 
 def absences(child_id: str) -> str:
     """Fravær for et barn."""
-    return json.dumps(client().absences(child_id), ensure_ascii=False, indent=2)
+    return _json(client().absences(child_id), ensure_ascii=False, indent=2)
 
 
 def consent_forms(child_id: str, organizational_unit_id: str) -> str:
     """Samtykkeskjemaer for et barn (krever organizationalUnitId)."""
-    return json.dumps(
+    return _json(
         client().consent_forms(child_id, organizational_unit_id), ensure_ascii=False, indent=2
     )
 
 
 def timetable(child_id: str, organizational_unit_id: str, week: str = "") -> str:
     """Timeplan/ukesplan for en ISO-uke ("YYYY-WW", default inneværende uke)."""
-    return json.dumps(
+    return _json(
         client().lessons(child_id, organizational_unit_id, week or None),
         ensure_ascii=False, indent=2,
     )
@@ -130,7 +206,7 @@ def timetable(child_id: str, organizational_unit_id: str, week: str = "") -> str
 
 def scheduling_events(child_id: str, organizational_unit_id: str, week: str = "") -> str:
     """Timeplan-hendelser (prøver, aktiviteter) for en ISO-uke ("YYYY-WW")."""
-    return json.dumps(
+    return _json(
         client().scheduling_events(child_id, organizational_unit_id, week or None),
         ensure_ascii=False, indent=2,
     )
@@ -144,12 +220,13 @@ def web_api_get(path: str, params_json: str = "{}") -> str:
     Returnerer status og body uansett utfall.
     """
     r = client().web_get(path, params=json.loads(params_json))
-    body = r.text
+    body = _sanitize(r.text)
     try:
-        body = json.dumps(r.json(), ensure_ascii=False, indent=2)
+        body = _json(r.json(), ensure_ascii=False, indent=2)
     except ValueError:
         pass
     return f"HTTP {r.status_code}\n{body[:20000]}"
+
 
 
 def message_contacts(child_id: str, organizational_unit_id: str) -> str:
@@ -157,7 +234,7 @@ def message_contacts(child_id: str, organizational_unit_id: str) -> str:
 
     Velg individuelle mottakere eksplisitt før meldingssending eller skolefravær.
     """
-    return json.dumps(client().message_contacts(child_id, organizational_unit_id),
+    return _json(client().message_contacts(child_id, organizational_unit_id),
                       ensure_ascii=False, indent=2)
 
 
@@ -170,7 +247,7 @@ def send_message(
     Hent message_contacts først. Minst én ansatt kreves; foresatte kan inkluderes.
     Ingen vedlegg. Ved ukjent resultat: sjekk meldingstrådene før nytt forsøk.
     """
-    return json.dumps(client().send_message(
+    return _json(client().send_message(
         child_id, organizational_unit_id, title, body, recipients,
     ), ensure_ascii=False, indent=2)
 
@@ -180,7 +257,7 @@ def reply_message(thread_uid: str, body: str) -> str:
 
     Ingen vedlegg eller fraværstråder. Ved ukjent resultat: les tråden før nytt forsøk.
     """
-    return json.dumps(client().reply_message(thread_uid, body), ensure_ascii=False, indent=2)
+    return _json(client().reply_message(thread_uid, body), ensure_ascii=False, indent=2)
 
 
 def register_student_absence(
@@ -193,7 +270,7 @@ def register_student_absence(
     eksplisitt valgte recipient-objekter fra message_contacts. Ingen vedlegg.
     Ved ukjent resultat: kontroller fravær før nytt forsøk, aldri automatisk retry.
     """
-    return json.dumps(client().register_student_absence(
+    return _json(client().register_student_absence(
         child_id, organizational_unit_id, from_date, to_date, note, title, recipients,
     ), ensure_ascii=False, indent=2)
 
@@ -203,7 +280,7 @@ def absence_codes(organizational_unit_id: str) -> str:
 
     Bruk id fra resultatet som absence_code_id i register_childcare_absence.
     """
-    return json.dumps(client().absence_codes(organizational_unit_id), ensure_ascii=False, indent=2)
+    return _json(client().absence_codes(organizational_unit_id), ensure_ascii=False, indent=2)
 
 
 def register_childcare_absence(
@@ -218,7 +295,7 @@ def register_childcare_absence(
     resultat: kontroller fravær før nytt forsøk, aldri automatisk retry.
     Bruk register_student_absence for skolefravær.
     """
-    return json.dumps(client().register_childcare_absence(
+    return _json(client().register_childcare_absence(
         child_id, organizational_unit_id, from_date, to_date, absence_code_id, note,
     ), ensure_ascii=False, indent=2)
 
@@ -232,6 +309,8 @@ TOOLS = (
     register_student_absence,
     list_children,
     list_message_threads,
+    message_participants,
+    search_message_thread,
     get_message_thread,
     read_message_attachments,
     read_post_attachments,
@@ -253,7 +332,7 @@ def register_tools(server: MCPServer) -> None:
     (`vigilo_connector.gateway`), så verktøyene defineres ett sted.
     """
     for fn in TOOLS:
-        server.add_tool(fn)
+        server.add_tool(_anticipated_errors(fn))
 
 
 mcp = MCPServer("vigilo")

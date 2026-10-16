@@ -7,19 +7,65 @@ MCP-verktøyet `api_get` til å utforske.
 """
 
 import io
+import math
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
+from contextlib import contextmanager
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, time as datetime_time, timedelta
+from zoneinfo import ZoneInfo
 from urllib.parse import quote
 
 import httpx
 
-from .auth import AuthError, TokenStore, user_id_from_jwt
+from .auth import AuthError, AuthLockTimeout, TokenStore, auth_budget, user_id_from_jwt
+from .http_logging import LoggedClient, logged_get
 from .config import API_BASE, APP_VERSION, WEB_API_BASE
 from .transport import JSON_CONTENT_TYPE, android_client, android_json, is_filestorage
 
 
 class WriteOutcomeUnknown(RuntimeError):
     """Skrivekallet kan ha blitt behandlet; ikke send det på nytt automatisk."""
+
+
+class SearchIncomplete(RuntimeError):
+    """Forventet ufullstendig søk; trygt å vise uten serverinnhold."""
+
+
+def _oslo_today() -> date:
+    return datetime.now(ZoneInfo("Europe/Oslo")).date()
+
+
+def _search_window(since: str | None) -> tuple[str, datetime]:
+    if since is None:
+        today = _oslo_today()
+        start = date(today.year if today.month >= 8 else today.year - 1, 8, 1)
+    else:
+        if not isinstance(since, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", since):
+            raise ValueError("since må vere ein ISO-dato: YYYY-MM-DD.")
+        try:
+            start = date.fromisoformat(since)
+        except ValueError:
+            raise ValueError("since må vere ein gyldig ISO-dato: YYYY-MM-DD.") from None
+    return start.isoformat(), datetime.combine(start, datetime_time.min, ZoneInfo("Europe/Oslo"))
+
+
+def _message_time(value) -> datetime:
+    # fromisoformat normaliserer til dømes +00:60; kontroller offset før parsing.
+    if not isinstance(value, str):
+        raise ValueError("Manglande timeCreated.")
+    match = re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?P<offset>[Zz]|[+-]\d{2}:\d{2})",
+        value,
+    )
+    if match is None:
+        raise ValueError("timeCreated må ha dato, klokkeslett og eksplisitt tidssone.")
+    offset = match.group("offset")
+    if offset.upper() != "Z" and (int(offset[1:3]) > 23 or int(offset[4:6]) > 59):
+        raise ValueError("Ugyldig tidssone i timeCreated.")
+    return datetime.fromisoformat(value.replace("t", "T").replace("z", "Z"))
 
 
 def _absence_dates(from_date: str, to_date: str) -> tuple[str, str]:
@@ -76,32 +122,84 @@ def _attachment_to_text(data: bytes, mime: str, name: str | None) -> str | None:
 
 class VigiloClient:
     def __init__(self, store: TokenStore | None = None):
+        self._read_context = threading.local()
         self._store = store or TokenStore()
         self._http = android_client(API_BASE, app_api=True)
-        self._web = httpx.Client(base_url=WEB_API_BASE, timeout=30)
+        self._web = LoggedClient(origin="web", base_url=WEB_API_BASE, timeout=30)
 
     def _headers(self, force_refresh: bool = False) -> dict:
         return {
-            "Authorization": f"Bearer {self._store.access_token(force_refresh)}",
+            "Authorization": f"Bearer {self._access_token(force_refresh)}",
             "appVersion": APP_VERSION,
         }
 
+    def _access_token(self, force_refresh=False):
+        budget = getattr(self._read_context, "budget", None)
+        if budget is None:
+            return self._store.access_token(force_refresh)
+        deadline, stopped = budget
+        self._read_options()
+        previous_phase = getattr(self._read_context, "phase", "scan")
+        self._read_context.phase = "auth"
+        try:
+            with auth_budget(min(deadline, time.monotonic() + 15.0)):
+                token = self._store.access_token(force_refresh)
+        except AuthLockTimeout:
+            self._read_context.phase = "auth_lock"
+            raise
+        self._read_options()
+        self._read_context.phase = previous_phase
+        return token
+
+    def _search_diagnostics(self, started, default_phase):
+        phase = getattr(self._read_context, "phase", default_phase)
+        return f"phase={phase}, elapsed_s={time.monotonic() - started:.3f}; "
+
     def _web_headers(self, force_refresh: bool = False) -> dict:
         # Web-API-et fester bare Authorization-header; ingen appVersion/userId.
-        return {"Authorization": f"Bearer {self._store.access_token(force_refresh)}"}
+        return {"Authorization": f"Bearer {self._access_token(force_refresh)}"}
 
     @property
     def user_id(self) -> str:
         return user_id_from_jwt(self._store.access_token())
 
+    @contextmanager
+    def _search_reads(self, deadline, stopped):
+        previous = getattr(self._read_context, "budget", None)
+        self._read_context.budget = (deadline, stopped)
+        self._read_context.phase = "scan"
+        try:
+            yield
+        finally:
+            self._read_context.budget = previous
+            self._read_context.first_list = False
+
+    def _read_options(self):
+        budget = getattr(self._read_context, "budget", None)
+        if budget is None:
+            return {}
+        deadline, stopped = budget
+        remaining = deadline - time.monotonic()
+        if stopped.is_set() or remaining <= 0:
+            raise SearchIncomplete("Tidsbudsjettet er brukt opp; søket er ikkje komplett.")
+        if getattr(self._read_context, "first_list", False):
+            connect = min(5.0, remaining / 4)
+            return {"timeout": httpx.Timeout(
+                connect=connect, read=min(15.0, remaining - connect),
+                write=min(1.0, remaining / 20), pool=min(1.0, remaining / 20))}
+        return {"timeout": httpx.Timeout(
+            connect=min(5.0, remaining), read=min(15.0, remaining),
+            write=min(5.0, remaining), pool=min(5.0, remaining))}
+
     def get(self, path: str, params: dict | None = None) -> httpx.Response:
         """Rått GET-kall med auth og retry ved 401. Brukes også til kartlegging."""
         if is_filestorage(path):
-            # Android hopper over auth/session helt for filestorage-stier.
-            return self._http.get(path, params=params)
-        r = self._http.get(path, params=params, headers=self._headers())
+            return self._http.get(path, params=params, **self._read_options())
+        headers = self._headers()
+        r = self._http.get(path, params=params, headers=headers, **self._read_options())
         if r.status_code == 401:
-            r = self._http.get(path, params=params, headers=self._headers(force_refresh=True))
+            headers = self._headers(force_refresh=True)
+            r = self._http.get(path, params=params, headers=headers, **self._read_options())
         return r
 
     def get_json(self, path: str, params: dict | None = None):
@@ -130,32 +228,58 @@ class VigiloClient:
 
     # --- Kjente endepunkter ---------------------------------------------
 
-    def _post_json(self, path: str, payload: dict, force_refresh: bool = False) -> httpx.Response:
-        return self._http.post(
-            path, content=android_json(payload),
-            headers={**self._headers(force_refresh), "Content-Type": JSON_CONTENT_TYPE},
-            follow_redirects=False,
-        )
+    def _write_json(
+        self, method: str, path: str, payload: dict | None = None, *,
+        headers: dict[str, str] | None = None, retry_401: bool = False,
+        outcome: str = "Handlingen kan være utført. Kontroller gjeldende tilstand",
+    ) -> httpx.Response:
+        """Skriv uten redirects/retries; 401-fornyelse velges per operasjon.
 
-    def _post_absence(self, path: str, payload: dict) -> None:
-        """Kun et eksplisitt 401-svar gir ett nytt skriveforsøk."""
+        None betyr ingen body; {} betyr et tomt JSON-objekt. Ekstra headers
+        gjelder bare dette endepunktet og kan ikke overstyre autentisering.
+        """
+        if method not in {"POST", "PUT", "DELETE"}:
+            raise ValueError("Skriveverb må være POST, PUT eller DELETE.")
+        def request(force_refresh: bool = False) -> httpx.Response:
+            request_headers = {k: v for k, v in (headers or {}).items()
+                               if k.lower() not in {"authorization", "appversion"}}
+            request_headers.update(self._headers(force_refresh))
+            if payload is not None:
+                request_headers["Content-Type"] = JSON_CONTENT_TYPE
+            return self._http.request(
+                method, path, content=android_json(payload) if payload is not None else None,
+                headers=request_headers, follow_redirects=False,
+            )
         try:
-            response = self._post_json(path, payload)
-            if response.status_code == 401:
-                response = self._post_json(path, payload, force_refresh=True)
+            response = request()
+            if response.status_code == 401 and retry_401:
+                response = request(force_refresh=True)
         except httpx.TransportError:
             raise WriteOutcomeUnknown(
-                "Ukjent resultat: fraværet kan være registrert. Kontroller fraværsoversikten "
-                "før et nytt forsøk; ikke send automatisk på nytt."
+                f"Ukjent resultat: {outcome} før et nytt forsøk; ikke send automatisk på nytt."
             ) from None
+        correlation_id = response.headers.get("X-Correlation-Id", "")
+        correlation = (f" Korrelasjons-ID: {correlation_id}."
+                       if re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", correlation_id) else "")
         if response.status_code == 401:
-            raise AuthError("Fortsatt 401 etter token-fornyelse — kjør `vigilo-login` på nytt.")
-        if response.status_code >= 500:
+            raise AuthError("401 fra Vigilo — kjør `vigilo-login` på nytt." + correlation)
+        if 300 <= response.status_code < 400 or response.status_code >= 500:
             raise WriteOutcomeUnknown(
-                f"Vigilo svarte HTTP {response.status_code}. Fraværet kan være registrert. "
-                "Kontroller fraværsoversikten før et nytt forsøk; ikke send automatisk på nytt."
+                f"Vigilo svarte HTTP {response.status_code}. {outcome} før et nytt forsøk; "
+                "ikke send automatisk på nytt." + correlation
             )
-        response.raise_for_status()
+        if not 200 <= response.status_code < 300:
+            raise httpx.HTTPStatusError(
+                f"Vigilo avviste skrivekallet med HTTP {response.status_code}." + correlation,
+                request=response.request, response=response,
+            )
+        return response
+
+    def _post_absence(self, path: str, payload: dict) -> None:
+        self._write_json(
+            "POST", path, payload, retry_401=True,
+            outcome="Fraværet kan være registrert. Kontroller fraværsoversikten",
+        )
 
     def absence_codes(self, organizational_unit_id: str) -> list:
         """Aktive fraværskoder for den valgte barnehagen."""
@@ -253,24 +377,10 @@ class VigiloClient:
         return data if isinstance(data, list) else data.get("items", [])
 
     def _post_message(self, path: str, payload: dict) -> None:
-        """Send én gang; kun eksplisitt 401 tillater tokenfornyelse og retry."""
-        try:
-            response = self._post_json(path, payload)
-            if response.status_code == 401:
-                response = self._post_json(path, payload, force_refresh=True)
-        except httpx.TransportError:
-            raise WriteOutcomeUnknown(
-                "Ukjent resultat: meldingen kan være sendt. Kontroller meldingstrådene "
-                "før et nytt forsøk; ikke send automatisk på nytt."
-            ) from None
-        if response.status_code == 401:
-            raise AuthError("Fortsatt 401 etter token-fornyelse — kjør `vigilo-login` på nytt.")
-        if response.status_code >= 500:
-            raise WriteOutcomeUnknown(
-                f"Vigilo svarte HTTP {response.status_code}. Meldingen kan være sendt. "
-                "Kontroller meldingstrådene før et nytt forsøk; ikke send automatisk på nytt."
-            )
-        response.raise_for_status()
+        self._write_json(
+            "POST", path, payload, retry_401=True,
+            outcome="Meldingen kan være sendt. Kontroller meldingstrådene",
+        )
 
     def send_message(
         self, child_id: str, organizational_unit_id: str, title: str, body: str,
@@ -290,7 +400,7 @@ class VigiloClient:
                     or not isinstance(recipient["externalId"], str)
                     or not recipient["externalId"].strip()):
                 raise ValueError("Mottakere må ha type employee/legalGuardian og externalId fra kontaktlisten.")
-            if recipient not in selected:
+            if not any(r["externalId"] == recipient["externalId"] for r in selected):
                 selected.append(dict(recipient))
         if not any(r["type"] == "employee" for r in selected):
             raise ValueError("Minst én lærer/administrasjon må være mottaker.")
@@ -301,9 +411,13 @@ class VigiloClient:
                        for c in g.get("employees") or [])
         if any(r not in allowed for r in selected):
             raise ValueError("Velg mottakere fra kontaktlisten for dette barnet og denne enheten.")
+        # Appens use-case legger barnet først; ContactTypeMapper serialiserer
+        # CHILD som "client". Mapperen dedupliserer deretter alle på kontakt-ID.
+        wire_recipients = [{"type": "client", "externalId": child_id}]
+        wire_recipients.extend(r for r in selected if r["externalId"] != child_id)
         self._post_message("/api/messages", {
             "organizationalUnitId": organizational_unit_id, "title": title, "body": body,
-            "attachments": [], "recipients": selected,
+            "attachments": [], "recipients": wire_recipients,
         })
         return {"status": "sent", "childId": child_id, "title": title, "recipients": selected}
 
@@ -314,29 +428,160 @@ class VigiloClient:
                 raise ValueError(f"{field} må være utfylt.")
         if thread_uid in (".", ".."):
             raise ValueError("Ugyldig thread_uid.")
+        thread = self.get_thread(thread_uid)
+        # Bare ordinært detaljendepunkt kan brukes for svar her. Fravær har
+        # egne endepunkter og krever en separat, kartlagt skrivekontrakt.
+        if thread.get("threadUid") != thread_uid or "isReplyDisabled" not in thread:
+            raise ValueError("Kun en bekreftet ordinær meldingstråd kan besvares.")
+        if thread["isReplyDisabled"] is not False:
+            raise ValueError("Svar er deaktivert i denne meldingstråden.")
+        if thread.get("isDeleted") is True:
+            raise ValueError("En slettet meldingstråd kan ikke besvares.")
         self._post_message(f"/api/messages/{quote(thread_uid, safe='')}/reply", {
             "body": body, "attachments": [],
         })
         return {"status": "sent", "threadUid": thread_uid}
 
-    def get_message_threads(
-        self, child_id: str, page_size: int = 50, include_after_school: bool = True
-    ) -> list:
-        data = self.get_json(
-            "/api/message-threads",
-            params={
-                "childIds": child_id,
-                "pageSize": page_size,
-                "unreadMessageThreadsCountOnly": "false",
-                "includeAfterSchoolMessages": str(include_after_school).lower(),
-            },
-        )
-        return data.get("messageThreads", [])
+    @staticmethod
+    def _paging(page_size: int, page_id: int | None) -> dict:
+        if type(page_size) is not int or page_size < 1:
+            raise ValueError("page_size må vere eit positivt heiltal.")
+        if page_id is not None and (type(page_id) is not int or page_id < 0):
+            raise ValueError("page_id må vere eit ikkje-negativt heiltal.")
+        return {"pageSize": page_size, **({"pageId": page_id} if page_id is not None else {})}
 
-    def get_thread(self, thread_uid: str, page_size: int = 50) -> dict:
+    def get_message_threads_page(
+        self, child_id: str, page_size: int = 50, include_after_school: bool = True,
+        page_id: int | None = None,
+    ) -> dict:
+        """En side med rå metadata, inkludert pageId og siste melding per tråd."""
+        return self.get_json("/api/message-threads", params={
+            "childIds": child_id, **self._paging(page_size, page_id),
+            "unreadMessageThreadsCountOnly": "false",
+            "includeAfterSchoolMessages": str(include_after_school).lower(),
+        })
+
+    def get_message_threads(
+        self, child_id: str, page_size: int = 50, include_after_school: bool = True,
+        page_id: int | None = None,
+    ) -> list:
+        return self.get_message_threads_page(
+            child_id, page_size, include_after_school, page_id,
+        ).get("messageThreads", [])
+
+    def get_thread(
+        self, thread_uid: str, page_size: int = 50, page_id: int | None = None,
+    ) -> dict:
         return self.get_json(
-            f"/api/messages/threads/{thread_uid}",
-            params={"pageSize": page_size},
+            f"/api/messages/threads/{quote(thread_uid, safe='')}",
+            params=self._paging(page_size, page_id),
+        )
+
+    @staticmethod
+    def _search_timeout(timeout_s):
+        if (isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float))
+                or not math.isfinite(timeout_s) or timeout_s <= 0 or timeout_s > 120):
+            raise ValueError("timeout_s må vere eit tal større enn 0 og høgst 120.")
+
+    def search_message_thread(
+        self, thread_uid: str, query: str, page_size: int = 50, max_pages: int = 100,
+        timeout_s: float = 45.0,
+    ) -> dict:
+        """Søk alle detaljsider med et tidsbudsjett; endrer ikke lesestatus."""
+        self._search_timeout(timeout_s)
+        inherited = getattr(self._read_context, "budget", None)
+        deadline, stopped = inherited or (time.monotonic() + timeout_s, threading.Event())
+        with self._search_reads(deadline, stopped):
+            return self._search_message_thread(thread_uid, query, page_size, max_pages, timeout_s)
+
+    def _search_message_thread(self, thread_uid, query, page_size, max_pages, timeout_s, since_cutoff=None):
+        if not isinstance(thread_uid, str) or not thread_uid.strip() or thread_uid in (".", ".."):
+            raise ValueError("thread_uid må vere ein gyldig ID.")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query må vere utfylt.")
+        self._paging(page_size, None)
+        if type(max_pages) is not int or max_pages < 1:
+            raise ValueError("max_pages må vere eit positivt heiltal.")
+        started = time.monotonic()
+        pages_fetched = messages_scanned = 0
+        def incomplete(reason):
+            return SearchIncomplete(
+                f"{reason} Søket er ikkje komplett. max_pages={max_pages}, "
+                f"page_size={page_size}, timeout_s={timeout_s}; "
+                + self._search_diagnostics(started, "scan") +
+                f"pagesFetched={pages_fetched}, messagesScanned={messages_scanned}.")
+        query_folded = query.casefold()
+        page_id = None
+        seen_pages, seen_messages = set(), set()
+        matches = []
+        for _ in range(max_pages):
+            try:
+                page = self.get_thread(thread_uid, page_size, page_id)
+                self._read_options()
+            except SearchIncomplete:
+                raise incomplete("Tidsbudsjettet er brukt opp.") from None
+            except AuthError:
+                raise incomplete("Autentisering feila.") from None
+            except httpx.HTTPStatusError as error:
+                raise incomplete(f"Vigilo svarte HTTP {error.response.status_code}.") from None
+            except httpx.TransportError:
+                raise incomplete("Lesekallet feila eller nådde tidsgrensa.") from None
+            except ValueError:
+                raise incomplete("Ugyldig JSON-respons frå Vigilo.") from None
+            pages_fetched += 1
+            if (not isinstance(page, dict) or page.get("threadUid") != thread_uid
+                    or not isinstance(page.get("messages"), list)):
+                raise incomplete("Ugyldig trådside.")
+            messages = page["messages"]
+            if not messages:
+                return {"threadUid": thread_uid, "query": query, "matches": matches,
+                        "pagesFetched": pages_fetched, "messagesScanned": messages_scanned,
+                        "complete": True}
+            returned_page = page.get("pageId")
+            if (type(returned_page) is not int or returned_page < 0
+                    or returned_page in seen_pages
+                    or (page_id is not None and returned_page != page_id)):
+                raise incomplete("Ugyldig eller gjenteken pageId.")
+            seen_pages.add(returned_page)
+            new_messages = 0
+            for message in messages:
+                if (not isinstance(message, dict) or not isinstance(message.get("id"), str)
+                        or not message["id"] or not isinstance(message.get("body"), str)):
+                    raise incomplete("Ugyldig melding.")
+                timestamp = None
+                if since_cutoff is not None:
+                    try:
+                        timestamp = _message_time(message.get("timeCreated"))
+                    except (ValueError, OverflowError):
+                        raise incomplete("Ugyldig eller manglande timeCreated i melding.") from None
+                if message["id"] in seen_messages:
+                    continue
+                seen_messages.add(message["id"])
+                new_messages += 1
+                if since_cutoff is not None and timestamp < since_cutoff:
+                    continue
+                messages_scanned += 1
+                attachments = message.get("attachments") or []
+                if (not isinstance(attachments, list)
+                        or any(not isinstance(attachment, dict) for attachment in attachments)):
+                    raise incomplete("Ugyldige vedlegg.")
+                fields = [message["body"], *(attachment.get("name") or "" for attachment in attachments)]
+                if any(isinstance(field, str) and query_folded in field.casefold() for field in fields):
+                    matches.append({"pageId": returned_page, "message": message})
+            if not new_messages:
+                raise incomplete("Meldingssida blir gjenteken utan framdrift.")
+            page_id = returned_page + 1
+        raise incomplete("Sidegrensa er nådd.")
+
+
+    def message_participants(self, thread_uid: str, child_id: str) -> dict:
+        """Deltakere og trådstarter fra appens ordinære meldingstråd."""
+        for field, value in (("thread_uid", thread_uid), ("child_id", child_id)):
+            if not isinstance(value, str) or not value.strip() or value in (".", ".."):
+                raise ValueError(f"{field} må være en gyldig ID.")
+        return self.get_json(
+            f"/api/message-threads/{quote(thread_uid, safe='')}/participants",
+            params={"childPersonId": child_id},
         )
 
     # --- Web-foreldreportal ---------------------------------------------
@@ -352,27 +597,24 @@ class VigiloClient:
         return data if isinstance(data, list) else data.get("items", data.get("children", []))
 
     def children(self) -> list:
-        """Barn flatet ut til det verktøyene trenger: childId + organizationalUnitId.
+        """Én rad per barn/enhet, inkludert SFO, med stabile ID-er og type.
 
-        Web-API-et gir childId som `id` og skolen/klassen i `organizationalUnits`.
-        Returnerer f.eks. {childId, firstName, lastName, organizationalUnitId,
-        school, group}. Bruk denne som inngang til timeplan/fravær/samtykke.
+        Rå enhetsfelt og alle grupper beholdes. Barn uten enhet beholdes også.
         """
         out = []
         for c in self.web_children():
-            units = c.get("organizationalUnits") or []
-            unit = units[0] if units else {}
-            groups = unit.get("groups") or []
-            out.append(
-                {
+            for unit in c.get("organizationalUnits") or [{}]:
+                groups = unit.get("groups") or []
+                out.append({
                     "childId": c.get("id") or c.get("childId"),
-                    "firstName": c.get("firstName"),
-                    "lastName": c.get("lastName"),
+                    "firstName": c.get("firstName"), "lastName": c.get("lastName"),
                     "organizationalUnitId": unit.get("id"),
+                    "organizationalUnitType": unit.get("type"),
+                    "organizationalUnit": dict(unit),
                     "school": unit.get("name"),
                     "group": groups[0].get("name") if groups else None,
-                }
-            )
+                    "groups": groups,
+                })
         return out
 
     def web_current_user(self) -> dict:
@@ -469,7 +711,7 @@ class VigiloClient:
                     out.append({"name": name, "mimeType": mime, "note": "mangler URL"})
                     continue
                 try:
-                    resp = httpx.get(url, timeout=60, follow_redirects=True)
+                    resp = logged_get(url, origin="attachment", timeout=60, follow_redirects=True)
                     resp.raise_for_status()
                     text = _attachment_to_text(resp.content, mime, name)
                     if text is None:

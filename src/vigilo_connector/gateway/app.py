@@ -52,7 +52,8 @@ def _friendly_errors(fn, setup_url: str):
     from mcp.server.mcpserver.exceptions import ToolError
 
     from ..auth import AuthError
-    from ..client import WriteOutcomeUnknown
+    from ..output import sanitize
+    from ..client import SearchIncomplete, WriteOutcomeUnknown
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -60,17 +61,20 @@ def _friendly_errors(fn, setup_url: str):
             return fn(*args, **kwargs)
         except AuthError as e:
             raise ToolError(
-                f"Vigilo er ikke satt opp, eller innloggingen er utløpt ({e}). "
+                f"Vigilo er ikke satt opp, eller innloggingen er utløpt ({sanitize(str(e))}). "
                 f"Be brukeren logge inn på nytt på {setup_url}"
             ) from None
+        except (ValueError, SearchIncomplete) as e:
+            raise ToolError(sanitize(str(e))) from None
         except WriteOutcomeUnknown as e:
-            raise ToolError(str(e)) from None
+            raise ToolError(sanitize(str(e))) from None
         except httpx.HTTPStatusError as e:
-            raise ToolError(f"Vigilo svarte HTTP {e.response.status_code} på {e.request.url.path}.") from None
+            raise ToolError(sanitize(f"Vigilo svarte HTTP {e.response.status_code} på {e.request.url.path}.")) from None
         except httpx.TransportError as e:
-            raise ToolError(f"Fikk ikke kontakt med Vigilo: {e}") from None
+            raise ToolError(sanitize(f"Fikk ikke kontakt med Vigilo: {e}")) from None
 
     return wrapper
+
 
 
 def create_app(settings: Settings, public_url: str, vigilo_client=None):

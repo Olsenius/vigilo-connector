@@ -8,6 +8,9 @@ Refresh-tokens roterer ved bruk og utløper etter 30-90 dager; da må
 `vigilo-login` kjøres på nytt.
 """
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import base64
 import json
 import secrets
@@ -18,10 +21,38 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 import httpx
 
 from .config import AUTH_BASE, REDIRECT_URI, SCOPE, TOKEN_FILE, load_client_credentials, write_json_atomic
+from .http_logging import logged_get
 from .transport import android_client
 
 # Forny access-token når det er mindre enn dette igjen av levetiden.
 EXPIRY_MARGIN = 15
+
+
+_AUTH_DEADLINE = ContextVar("vigilo_auth_deadline", default=None)
+
+
+@contextmanager
+def auth_budget(deadline):
+    """Share one short lock/refresh budget; never abandon a rotating refresh."""
+    token = _AUTH_DEADLINE.set(deadline)
+    try:
+        yield
+    finally:
+        _AUTH_DEADLINE.reset(token)
+
+
+def _auth_remaining():
+    deadline = _AUTH_DEADLINE.get()
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise httpx.PoolTimeout("Auth budget exhausted")
+    return remaining
+
+
+class AuthLockTimeout(httpx.PoolTimeout):
+    """Timed out waiting for the shared rotating-token lock."""
 
 
 class AuthError(RuntimeError):
@@ -60,10 +91,14 @@ def authorize_url(state: str) -> str:
 
 
 def _token_request(data: dict) -> dict:
+    remaining = _auth_remaining()
+    options = {} if remaining is None else {"timeout": httpx.Timeout(
+        connect=min(3.0, remaining / 5), read=min(10.0, remaining * 2 / 3),
+        write=min(1.0, remaining / 15), pool=min(1.0, remaining / 15))}
     with android_client(AUTH_BASE) as client:
         r = client.post(
             "/connect/token", headers={"Authorization": f"Basic {_basic_auth()}"},
-            data=data, follow_redirects=False,
+            data=data, follow_redirects=False, **options,
         )
     if r.status_code in (400, 401):
         raise AuthError(f"Token-kall avvist ({r.status_code}): {r.text[:300]}")
@@ -87,8 +122,8 @@ def code_from_cookies(cookie_header: str) -> str:
     302-redirectens Location-header. Krever ingen DevTools-jakt på koden.
     """
     state = secrets.token_urlsafe(16)
-    r = httpx.get(
-        authorize_url(state),
+    r = logged_get(
+        authorize_url(state), origin="oauth",
         headers={"cookie": cookie_header, "user-agent": "Mozilla/5.0"},
         follow_redirects=False,
         timeout=30,
@@ -138,7 +173,12 @@ class TokenStore:
         write_json_atomic(self.path, tokens)
 
     def access_token(self, force_refresh: bool = False) -> str:
-        with self._lock:
+        remaining = _auth_remaining()
+        acquired = self._lock.acquire() if remaining is None else self._lock.acquire(timeout=remaining)
+        if not acquired:
+            raise AuthLockTimeout("Auth lock budget exhausted")
+        try:
+            _auth_remaining()
             tokens = self.load()
             expires_at = tokens.get("obtained_at", 0) + tokens.get("expires_in", 0)
             if force_refresh or time.time() > expires_at - EXPIRY_MARGIN:
@@ -148,4 +188,8 @@ class TokenStore:
                 new_tokens = refresh(refresh_token)
                 tokens.update(new_tokens)
                 self.save(tokens)
+            # A received rotating pair must be durable before checking expiry.
+            _auth_remaining()
             return tokens["access_token"]
+        finally:
+            self._lock.release()
