@@ -232,6 +232,41 @@ def delete_pickup_note(child_id: str, note_id: str, month: str) -> str:
                  ensure_ascii=False, indent=2)
 
 
+def list_registrations(child_id: str) -> str:
+    """Påmeldingsskjema (t.d. SFO-langdag) for eit barn, med val og eventuelt svar.
+
+    registrationType er singleChoice, multipleChoices eller rankedChoices.
+    reply=null betyr ikkje svart. canReply=false når fristen
+    (registrationDeadline, UTC) er passert. Berre lesing.
+    """
+    return _json(client().registration_forms(child_id), ensure_ascii=False, indent=2)
+
+
+def reply_registration(
+    child_id: str, registration_id: str,
+    choice_ids: Annotated[list[str], Field(description=(
+        "registrationChoiceId frå list_registrations. singleChoice: nøyaktig eitt; "
+        "multipleChoices: minst eitt; rankedChoices: alle, i prioritert rekkjefølgje."))],
+) -> str:
+    """Svar på eit påmeldingsskjema når brukaren har bestilt det konkrete svaret.
+
+    Erstattar eit tidlegare svar. Avvist etter fristen. Ved ukjent resultat:
+    kontroller list_registrations, aldri automatisk retry.
+    """
+    return _json(client().reply_registration(child_id, registration_id, choice_ids),
+                 ensure_ascii=False, indent=2)
+
+
+def withdraw_registration_reply(child_id: str, registration_id: str) -> str:
+    """Trekk tilbake svaret på eit påmeldingsskjema når brukaren har bestilt det.
+
+    Krev eit eksisterande svar og at fristen ikkje er passert. Ved ukjent
+    resultat: kontroller list_registrations, aldri automatisk retry.
+    """
+    return _json(client().withdraw_registration_reply(child_id, registration_id),
+                 ensure_ascii=False, indent=2)
+
+
 def read_message_attachments(thread_uid: str) -> str:
     """Last ned og les vedleggene i en meldingstråd (f.eks. ukeplan-PDF).
 
@@ -426,6 +461,9 @@ TOOLS = (
     update_pickup_note,
     set_pickup_note_end_date,
     delete_pickup_note,
+    list_registrations,
+    reply_registration,
+    withdraw_registration_reply,
     read_message_attachments,
     read_post_attachments,
     api_get,

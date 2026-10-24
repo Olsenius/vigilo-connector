@@ -32,7 +32,7 @@ def test_signed_blob_never_leaves_any_registered_tool(wire, monkeypatch, tool):
                 return lambda *a, **kw: httpx.Response(200, json=data)
             return lambda *a, **kw: data
     monkeypatch.setattr(server, '_client', Fake())
-    arguments = {name: ([] if name == 'recipients' else 'synthetic')
+    arguments = {name: ([] if name in {'recipients', 'choice_ids'} else 'synthetic')
                  for name, parameter in inspect.signature(tool).parameters.items()
                  if parameter.default is inspect.Parameter.empty}
     result = wire(tool.__name__, arguments)

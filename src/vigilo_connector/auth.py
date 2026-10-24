@@ -148,9 +148,16 @@ def refresh(refresh_token: str) -> dict:
 
 
 def user_id_from_jwt(access_token: str) -> str:
-    payload = access_token.split(".")[1]
-    payload += "==" * (-len(payload) % 4)
-    return json.loads(base64.urlsafe_b64decode(payload))["sub"]
+    """Appens userId: claimet personId (SessionFromAccessTokenMapper), ikkje sub."""
+    try:
+        payload = access_token.split(".")[1]
+        payload += "==" * (-len(payload) % 4)
+        person_id = json.loads(base64.urlsafe_b64decode(payload)).get("personId")
+    except (IndexError, ValueError, AttributeError):
+        person_id = None
+    if not isinstance(person_id, str) or not person_id:
+        raise AuthError("Access-tokenet manglar personId; kjør `vigilo-login` på nytt.")
+    return person_id
 
 
 class TokenStore:

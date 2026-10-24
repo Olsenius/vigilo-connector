@@ -1023,6 +1023,119 @@ class VigiloClient:
             "verify": f"Kontroller med list_pickup_notes for {month}.",
         }
 
+    # --- Påmeldingsskjema (forms/registrations) ---------------------------
+    # Kartlagt frå appens RegistrationDetailsViewModel og
+    # MeetingsAndRegistrationsRepositoryImpl. inviteePersonId er userId frå
+    # sesjonen, dvs. sub i access-tokenet.
+
+    REGISTRATION_TYPES = ("singleChoice", "multipleChoices", "rankedChoices")
+
+    def registration_forms(self, child_id: str) -> dict:
+        """Påmeldingsskjema for barnet med val, frist og eventuelt svar."""
+        if not isinstance(child_id, str) or not child_id.strip():
+            raise ValueError("child_id må vere utfylt.")
+        if not any(isinstance(c, dict) and c.get("childId") == child_id
+                   for c in self.get_children()):
+            raise ValueError("Fann ikkje barnet; bruk childId frå list_children.")
+        data = self.get_json(f"/api/forms/registrations/invitations/{quote(child_id, safe='')}")
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("Ugyldig svar frå Vigilo for påmeldingar.")
+        now = datetime.now(ZoneInfo("UTC"))
+        for item in items:
+            if isinstance(item, dict):
+                deadline = self._registration_deadline(item)
+                # Som appen: svar kan givast og endrast fram til fristen.
+                item["canReply"] = deadline is not None and deadline > now
+        return {"childId": child_id, "registrations": [i for i in items if isinstance(i, dict)]}
+
+    @staticmethod
+    def _registration_deadline(item: dict) -> datetime | None:
+        value = item.get("registrationDeadline")
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return moment if moment.tzinfo is not None else None
+
+    def _open_registration(self, child_id: str, registration_id: str) -> dict:
+        if not isinstance(registration_id, str) or not registration_id.strip():
+            raise ValueError("registration_id må vere utfylt.")
+        with self.fresh_reads(True):
+            items = self.registration_forms(child_id)["registrations"]
+        item = next((i for i in items if i.get("id") == registration_id), None)
+        if item is None:
+            raise ValueError("Fann ikkje påmeldinga for barnet; bruk id frå list_registrations.")
+        if item["canReply"] is not True:
+            raise ValueError("Fristen for påmeldinga er passert; svaret kan ikkje endrast.")
+        return item
+
+    def reply_registration(self, child_id: str, registration_id: str,
+                           choice_ids: list[str]) -> dict:
+        """Svar på eit påmeldingsskjema (POST …/replies) som appen gjer det.
+
+        singleChoice: nøyaktig eitt val. multipleChoices: minst eitt val.
+        rankedChoices: alle val i prioritert rekkjefølgje. Eit nytt svar
+        erstattar det førre, som når appen lagrar på nytt.
+        """
+        item = self._open_registration(child_id, registration_id)
+        kind = item.get("registrationType")
+        if kind not in self.REGISTRATION_TYPES:
+            raise ValueError("Ukjend type påmelding; svar i appen.")
+        choices = {c.get("registrationChoiceId"): c for c in item.get("registrationChoices") or []
+                   if isinstance(c, dict) and isinstance(c.get("registrationChoiceId"), str)}
+        if (not isinstance(choice_ids, list) or not choice_ids
+                or not all(isinstance(c, str) for c in choice_ids)):
+            raise ValueError("choice_ids må vere ei liste med registrationChoiceId.")
+        if len(set(choice_ids)) != len(choice_ids):
+            raise ValueError("choice_ids kan ikkje innehalde same val fleire gonger.")
+        if any(c not in choices for c in choice_ids):
+            raise ValueError("Ukjend val; bruk registrationChoiceId frå list_registrations.")
+        if kind == "singleChoice" and len(choice_ids) != 1:
+            raise ValueError("Denne påmeldinga krev nøyaktig eitt val.")
+        if kind == "rankedChoices" and set(choice_ids) != set(choices):
+            raise ValueError("Denne påmeldinga krev alle val i prioritert rekkjefølgje.")
+        # rank: choiceNumber for enkelt-/fleirval, plassering for prioriterte val.
+        selected = []
+        for position, choice_id in enumerate(choice_ids, start=1):
+            rank = position if kind == "rankedChoices" else choices[choice_id].get("choiceNumber")
+            if type(rank) is not int:
+                raise ValueError("Ugyldig choiceNumber i påmeldinga frå Vigilo.")
+            selected.append({"rank": rank, "registrationChoiceId": choice_id})
+        self._write_json(
+            "POST", f"/api/forms/registrations/{quote(registration_id, safe='')}/replies",
+            {"childPersonId": child_id, "selectedRegistrationChoices": selected,
+             "inviteePersonId": self.user_id},
+            retry_401=True,
+            outcome="Svaret kan vere registrert. Kontroller list_registrations")
+        return {
+            "status": "replied", "childId": child_id, "registrationId": registration_id,
+            "title": item.get("title"), "replacedPreviousReply": item.get("reply") is not None,
+            "selectedChoices": [{"registrationChoiceId": s["registrationChoiceId"], "rank": s["rank"],
+                                 "choiceText": choices[s["registrationChoiceId"]].get("choiceText")}
+                                for s in selected],
+            "verify": "Kontroller reply med list_registrations.",
+        }
+
+    def withdraw_registration_reply(self, child_id: str, registration_id: str) -> dict:
+        """Trekk tilbake svaret (DELETE …/replies/{userId}/{childId}) som appen."""
+        item = self._open_registration(child_id, registration_id)
+        if item.get("reply") is None:
+            raise ValueError("Påmeldinga har ikkje noko svar å trekkje tilbake.")
+        self._write_json(
+            "DELETE",
+            f"/api/forms/registrations/{quote(registration_id, safe='')}/replies/"
+            f"{quote(self.user_id, safe='')}/{quote(child_id, safe='')}",
+            None, retry_401=True,
+            outcome="Svaret kan vere trekt tilbake. Kontroller list_registrations")
+        return {
+            "status": "withdrawn", "childId": child_id, "registrationId": registration_id,
+            "title": item.get("title"),
+            "verify": "Kontroller at reply er null med list_registrations.",
+        }
+
     @staticmethod
     def _validation_codes(response: httpx.Response) -> list[str]:
         """Kodane i Vigilos ValidationError-svar (type og validationErrors[*].errorCode)."""

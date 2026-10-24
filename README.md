@@ -283,6 +283,9 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `update_pickup_note` | Endre hele hentemeldingen/serien (SFO); utelatte felt beholdes |
 | `set_pickup_note_end_date` | Ny siste dag for en hentemelding/serie (SFO) |
 | `delete_pickup_note` | Slett hele hentemeldingen/serien (SFO) |
+| `list_registrations` | Påmeldingsskjema for et barn med valg, frist og eventuelt svar |
+| `reply_registration` | Svar på et påmeldingsskjema (erstatter tidligere svar) |
+| `withdraw_registration_reply` | Trekk tilbake svaret på et påmeldingsskjema |
 | `consent_forms` | Samtykkeskjemaer (krever `organizationalUnitId`) |
 | `timetable` | Timeplan/ukesplan for en ISO-uke |
 | `scheduling_events` | Prøver/aktiviteter i timeplanen for en uke |
@@ -407,8 +410,9 @@ de fire eksisterende skriveoperasjonene beholder ett forsøk etter eksplisitt
 nytt etter transportfeil, 3xx eller 5xx; utfallet regnes da som ukjent.
 Feilmeldinger viser HTTP-status og et
 formatbegrenset `X-Correlation-Id` når tilgjengelig, aldri responsinnhold.
-`create_pickup_note`, `update_pickup_note`, `set_pickup_note_end_date` og
-`delete_pickup_note` har samme 401-forsøk.
+`create_pickup_note`, `update_pickup_note`, `set_pickup_note_end_date`,
+`delete_pickup_note`, `reply_registration` og `withdraw_registration_reply` har
+samme 401-forsøk.
 
 Hentemeldinger kan leses, opprettes, endres og slettes.
 Som i appen vises de bare for barn med en SFO-enhet (`type: afterSchool` i
@@ -477,6 +481,23 @@ det kopieres ikke. Siste dag kan ikke være før startdatoen, og ikke før
 sluttdatoskjerm. `delete_pickup_note` sender `DELETE /api/check-in-notes/{id}`
 uten body; live-verifisert 16.10.2026 (HTTP 204, serien borte ved tilbake-lesing,
 andre meldinger urørt). Kontroller alltid resultatet med `list_pickup_notes`.
+
+Påmeldingsskjema (f.eks. SFO-langdag) hentes med `list_registrations(child_id)`
+fra `GET /api/forms/registrations/invitations/{childId}`. `reply=null` betyr
+ikke svart; `canReply` er `false` når `registrationDeadline` er passert, slik
+appen låser skjemaet. `reply_registration` sender
+`POST /api/forms/registrations/{id}/replies` med `childPersonId`,
+`inviteePersonId` (brukerens `userId`, dvs. claimet `personId` i access-tokenet;
+`sub` gir HTTP 403) og
+`selectedRegistrationChoices` med `registrationChoiceId` og `rank`. Som i appen
+er `rank` valgets `choiceNumber` for `singleChoice` (nøyaktig ett valg) og
+`multipleChoices` (minst ett), og plasseringen for `rankedChoices` (alle valg i
+prioritert rekkefølge). Et nytt svar sendes som en ny POST, slik appen lagrer på
+nytt. `withdraw_registration_reply` sender
+`DELETE /api/forms/registrations/{id}/replies/{userId}/{childId}` og krever et
+eksisterende svar. Begge leser skjemaet på nytt og avviser etter fristen.
+Svar er live-verifisert 24.10.2026 (HTTP 200, svaret synlig ved
+tilbake-lesing); tilbaketrekking er ennå ikke live-verifisert. Kontroller alltid resultatet med `list_registrations`.
 
 Skolefravær tar datoer som `YYYY-MM-DD` (begge dager inkludert).
 Ved sending konverteres siste fraværsdag til eksklusiv sluttdato dagen etter,
