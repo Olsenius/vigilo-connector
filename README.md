@@ -300,6 +300,7 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `withdraw_meeting_reply` | Meld av et valgt møtetidspunkt |
 | `consent_forms` | Samtykkeskjemaer (krever `organizationalUnitId`) |
 | `mark_read` | Marker tråd, skolefravær, oppslag, rutine eller samtykkeskjema som lest (bare på eksplisitt forespørsel) |
+| `set_profile_picture` | Bytt ditt profilbilde (original og utsnitt, JPEG) |
 | `list_consents` | Samtykkeskjemaer fra app-API-et med ditt svar, `canGive`/`canRevoke` |
 | `give_consent` | Gi samtykke for et barn |
 | `revoke_consent` | Trekk tilbake et gitt samtykke |
@@ -593,6 +594,16 @@ Som appen sendes bare «lest», aldri «ulest»:
   skjemaene må finnes i `list_consents`.
 
 Tråd, fravær og oppslag tar én ID per kall, som appen. Selve markeringene er ikke live-testet.
+
+`set_profile_picture` følger `UploadProfilePictureUseCase`:
+`POST /api/current-user/profile-picture` med `{originalImage, croppedImage}`, hver
+`{name, mimeType: "image/jpeg", dataBase64}`. Appen lager utsnittet selv; her leverer
+brukeren begge bildene, og begge må være JPEG under 5 120 000 byte. Ikke live-testet.
+
+Medvitent utelatt: `POST /api/push/notification-settings` (varslingsinnstillinger) gjelder én
+`deviceId`, altså én telefon, og connectoren kjenner ikke telefonens enhets-ID.
+`POST`/`DELETE /api/push/recipient` registrerer en push-mottaker (FCM-token); connectoren har
+ingen mottakertjeneste og skal ikke utgi seg for å være en telefon.
 
 `delete_childcare_absence` finner fraværet i `list_childcare_absences`
 (`GET /api/absences?childIds=&pageSize=50`; Vigilo svarer HTTP 500 for barn uten

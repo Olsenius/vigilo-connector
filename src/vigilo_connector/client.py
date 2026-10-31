@@ -758,6 +758,30 @@ class VigiloClient:
                              retry_401=True, outcome=outcome)
         return {"status": "marked_read", "kind": kind, "ids": ids, "childId": child_id}
 
+    # --- Profilbilete (V3) -----------------------------------------------
+    # Appen (UploadProfilePictureUseCase): POST /api/current-user/profile-picture
+    # med {originalImage, croppedImage}, kvar {name, mimeType: "image/jpeg",
+    # dataBase64}. Appen lagar utsnittet sjølv; her må brukaren levere begge.
+
+    @staticmethod
+    def _profile_image(item, field: str) -> dict:
+        files = _attachments([item]) if isinstance(item, dict) else None
+        if not files or files[0]["mimeType"] != "IMAGE_JPEG":
+            raise ValueError(f"{field} må vere eit JPEG-bilete {{name, dataBase64}} (.jpg/.jpeg).")
+        if not base64.b64decode(files[0]["dataBase64"]).startswith(b"\xff\xd8\xff"):
+            raise ValueError(f"{field} er ikkje eit JPEG-bilete.")
+        return {"name": files[0]["name"], "mimeType": "image/jpeg",
+                "dataBase64": files[0]["dataBase64"]}
+
+    def set_profile_picture(self, original_image: dict, cropped_image: dict) -> dict:
+        """Byt profilbiletet til den innlogga brukaren (synleg for skule og barnehage)."""
+        payload = {"originalImage": self._profile_image(original_image, "original_image"),
+                   "croppedImage": self._profile_image(cropped_image, "cropped_image")}
+        self._write_json("POST", "/api/current-user/profile-picture", payload, retry_401=True,
+                         outcome="Profilbiletet kan vere bytt. Kontroller i appen")
+        return {"status": "updated", "originalImage": payload["originalImage"]["name"],
+                "croppedImage": payload["croppedImage"]["name"]}
+
     # --- Barnehagefråvær: lesing og sletting ----------------------------
     # Appen: GET api/absences?childIds=&pageSize= og detaljar
     # GET api/absences/{id}?organizationalUnitId=; slett når isDeletable.

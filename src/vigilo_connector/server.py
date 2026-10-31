@@ -573,6 +573,16 @@ def mark_read(
     return _json(client().mark_read(kind, ids, child_id or None), ensure_ascii=False, indent=2)
 
 
+def set_profile_picture(original_image: dict[str, str], cropped_image: dict[str, str]) -> str:
+    """Byt profilbiletet ditt i Vigilo når brukaren eksplisitt har bestilt det.
+
+    Begge er {name, dataBase64} med JPEG (.jpg/.jpeg), under 5 120 000 byte. cropped_image
+    er utsnittet som blir vist (appen lagar det sjølv). Biletet er synleg for tilsette.
+    """
+    return _json(client().set_profile_picture(original_image, cropped_image),
+                 ensure_ascii=False, indent=2)
+
+
 def list_childcare_absences(child_id: str) -> str:
     """Barnehagefråvær for eit barn, nyaste først (første side, opptil 50).
 
@@ -662,6 +672,7 @@ TOOLS = (
     absences,
     consent_forms,
     mark_read,
+    set_profile_picture,
     list_consents,
     give_consent,
     revoke_consent,

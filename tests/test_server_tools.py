@@ -16,6 +16,7 @@ EXPECTED = {
     "get_absence_thread",
     "reply_absence_thread",
     "mark_read",
+    "set_profile_picture",
     "list_consents",
     "give_consent",
     "revoke_consent",

@@ -139,7 +139,9 @@ def test_profile_url_policy_on_every_registered_tool_wire(wire, monkeypatch, too
     arguments = {}
     for name, parameter in inspect.signature(tool).parameters.items():
         if parameter.default is inspect.Parameter.empty:
-            arguments[name] = [] if name in {'recipients', 'choice_ids', 'ids'} else 'test-placeholder'
+            arguments[name] = ([] if name in {'recipients', 'choice_ids', 'ids'}
+                               else {'name': 'test.jpg', 'dataBase64': 'eA=='}
+                               if name.endswith('_image') else 'test-placeholder')
     result = wire(tool.__name__, arguments)
     assert result.get('isError') is not True, result
     text = json.dumps(result)
