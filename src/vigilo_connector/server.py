@@ -449,6 +449,41 @@ def register_childcare_absence(
     ), ensure_ascii=False, indent=2)
 
 
+def list_school_absences(child_id: str) -> str:
+    """Skulefråvær for eit barn med absenceId (første side frå Vigilo, opptil 50, ikkje sortert).
+
+    lastDay er siste fråværsdag (inkludert). canEdit=true betyr at
+    update_student_absence er tillate; fromSchool=true er fråværsmelding frå skulen.
+    """
+    return _json(client().school_absences(child_id), ensure_ascii=False, indent=2)
+
+
+def update_student_absence(child_id: str, absence_id: str, from_date: str, to_date: str) -> str:
+    """Endre perioden for eit skulefråvær når brukaren har bestilt det. Krev canEdit=true.
+
+    Datoar YYYY-MM-DD, begge dagar inkluderte. Berre perioden kan endrast, som i appen.
+    Fråværet får ny absenceId etter endring; hent han på nytt før neste endring.
+    Ved ukjent resultat: kontroller list_school_absences, aldri automatisk nytt forsøk.
+    """
+    return _json(client().update_student_absence(child_id, absence_id, from_date, to_date),
+                 ensure_ascii=False, indent=2)
+
+
+def list_childcare_absences(child_id: str) -> str:
+    """Barnehagefråvær for eit barn, nyaste først (første side, opptil 50).
+
+    lastDay er siste fråværsdag (inkludert). isDeletable=true betyr at
+    delete_childcare_absence er tillate.
+    """
+    return _json(client().childcare_absences(child_id), ensure_ascii=False, indent=2)
+
+
+def delete_childcare_absence(child_id: str, absence_id: str) -> str:
+    """Slett eit barnehagefråvær når brukaren har bestilt det. Krev isDeletable=true."""
+    return _json(client().delete_childcare_absence(child_id, absence_id),
+                 ensure_ascii=False, indent=2)
+
+
 def list_sfo_absences(child_id: str, organizational_unit_id: str = "") -> str:
     """SFO-fråvær for eit barn, nyaste først (første side, opptil 50 fråvær totalt).
 
@@ -487,8 +522,12 @@ TOOLS = (
     reply_message,
     absence_codes,
     register_childcare_absence,
+    list_childcare_absences,
+    delete_childcare_absence,
     message_contacts,
     register_student_absence,
+    list_school_absences,
+    update_student_absence,
     list_sfo_absences,
     register_sfo_absence,
     delete_sfo_absence,

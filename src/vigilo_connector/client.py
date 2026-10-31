@@ -331,6 +331,169 @@ class VigiloClient:
             "absenceCode": {"id": selected["id"], "name": selected["name"]}, "note": note,
         }
 
+    def _delete_absence(self, absence_id: str, unit: str, verify_tool: str) -> None:
+        """DELETE /api/absences/{id}?organizationalUnitId= (appens deleteAbsence)."""
+        self._write_json(
+            "DELETE", f"/api/absences/{quote(absence_id, safe='')}?"
+            + urlencode({"organizationalUnitId": unit}), retry_401=True,
+            outcome=f"Fråværet kan vere sletta. Kontroller {verify_tool}",
+        )
+
+    # --- Skulefråvær: lesing og endring --------------------------------
+    # Appen (EditAbsenceBottomSheetViewModel): endring berre når isEditable og
+    # ikkje ei fråværsmelding frå skulen; PUT med yyyy-MM-dd og eksklusiv toDate.
+
+    def school_absences(self, child_id: str) -> dict:
+        """Skulefråvær for barnet (første side frå Vigilo, opptil 50 fråvær totalt)."""
+        if not isinstance(child_id, str) or not child_id.strip():
+            raise ValueError("child_id må vere utfylt.")
+        child = next((c for c in self.get_children()
+                      if isinstance(c, dict) and c.get("childId") == child_id), None)
+        if child is None:
+            raise ValueError("Fann ikkje barnet; bruk childId frå list_children.")
+        if not any(isinstance(u, dict) and u.get("type") == "school"
+                   for u in child.get("organizationalUnits") or []):
+            raise ValueError("Barnet har inga skuleeining.")
+        data = self.get_json("/api/student-absences", params={
+            "studentIds": child_id, "pageSize": 50, "includeAfterSchoolAbsences": "false"})
+        items = data.get("absences") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("Ugyldig svar frå Vigilo for fråvær.")
+        out = []
+        for item in items:
+            if not (isinstance(item, dict) and item.get("absenceType") == "school"
+                    and item.get("childId") == child_id):
+                continue
+            start, end = (str(item.get(k) or "")[:10] for k in ("fromDate", "toDate"))
+            try:
+                last = (date.fromisoformat(end) - timedelta(days=1)).isoformat()
+            except ValueError:
+                last = None
+            out.append({
+                "absenceId": item.get("absenceId"),
+                "organizationalUnitId": item.get("organizationalUnitId"),
+                "fromDate": start or None, "lastDay": last,
+                "canEdit": self._school_absence_editable(item),
+                "fromSchool": item.get("messageThreadType") == "absenceNotificationMessage",
+                "timeCreated": item.get("timeCreated"),
+            })
+        return {"childId": child_id, "absences": out}
+
+    @staticmethod
+    def _school_absence_editable(item: dict) -> bool:
+        return (item.get("isEditable") is True
+                and item.get("messageThreadType") != "absenceNotificationMessage")
+
+    def update_student_absence(
+        self, child_id: str, absence_id: str, from_date: str, to_date: str,
+    ) -> dict:
+        """Endre perioden for skulefråvær (PUT /api/student-absences/{id})."""
+        if not isinstance(absence_id, str) or not absence_id.strip():
+            raise ValueError("absence_id må vere utfylt.")
+        _absence_dates(from_date, to_date)          # same kontroll som ved oppretting
+        start = date.fromisoformat(from_date)
+        end = date.fromisoformat(to_date) + timedelta(days=1)
+        listed = next((a for a in self.school_absences(child_id)["absences"]
+                       if a["absenceId"] == absence_id), None)
+        if listed is None or not listed["organizationalUnitId"]:
+            raise ValueError("Fann ikkje fråværet for barnet; bruk absenceId frå "
+                             "list_school_absences.")
+        unit = listed["organizationalUnitId"]
+        detail = self.get_json(f"/api/student-absences/{quote(absence_id, safe='')}",
+                               params={"organizationalUnitId": unit})
+        # Detaljsvaret har barnet i student.id, ikkje childId (live 2026-10-31).
+        student = detail.get("student") if isinstance(detail, dict) else None
+        if not isinstance(student, dict) or student.get("id") != child_id:
+            raise ValueError("Fråværet høyrer ikkje til barnet.")
+        if not self._school_absence_editable(detail):
+            raise ValueError("Vigilo tillèt ikkje å endre dette fråværet (isEditable=false "
+                             "eller fråværsmelding frå skulen).")
+        payload = {"organizationalUnitId": unit,
+                   "fromDate": start.isoformat(), "toDate": end.isoformat()}
+        try:
+            self._write_json(
+                "PUT", f"/api/student-absences/{quote(absence_id, safe='')}", payload,
+                retry_401=True,
+                outcome="Fråværet kan vere endra. Kontroller list_school_absences",
+            )
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code != 400:
+                raise
+            # Appen tolkar alle 400 her som overlapp (ParseEditAbsenceErrorUseCase).
+            raise ValueError("Vigilo avviste endringa: perioden overlappar eit anna "
+                             "fråvær.") from None
+        return {
+            "status": "updated", "childId": child_id, "absenceId": absence_id,
+            "previous": {"fromDate": listed["fromDate"], "lastDay": listed["lastDay"]},
+            "fromDate": from_date, "toDate": to_date,
+            # Live 2026-10-31: Vigilo gir fråværet ny absenceId ved kvar endring.
+            "verify": "Vigilo gir fråværet ny absenceId; hent han med list_school_absences.",
+        }
+
+    # --- Barnehagefråvær: lesing og sletting ----------------------------
+    # Appen: GET api/absences?childIds=&pageSize= og detaljar
+    # GET api/absences/{id}?organizationalUnitId=; slett når isDeletable.
+
+    def childcare_absences(self, child_id: str) -> dict:
+        """Barnehagefråvær for barnet, nyaste først (første side, opptil 50)."""
+        if not isinstance(child_id, str) or not child_id.strip():
+            raise ValueError("child_id må vere utfylt.")
+        child = next((c for c in self.get_children()
+                      if isinstance(c, dict) and c.get("childId") == child_id), None)
+        if child is None:
+            raise ValueError("Fann ikkje barnet; bruk childId frå list_children.")
+        # Vigilo svarer HTTP 500 for barn utan barnehage (live 2026-10-31).
+        if not any(isinstance(u, dict) and u.get("type") == "childcare"
+                   for u in child.get("organizationalUnits") or []):
+            raise ValueError("Barnet har inga barnehageeining.")
+        data = self.get_json("/api/absences", params={"childIds": child_id, "pageSize": 50})
+        items = data.get("absences") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("Ugyldig svar frå Vigilo for fråvær.")
+        out = []
+        for item in items:
+            if not (isinstance(item, dict) and item.get("childId") == child_id):
+                continue
+            start, end = (str(item.get(k) or "")[:10] for k in ("fromDate", "toDate"))
+            try:
+                # Eksklusiv toDate som ved registrering: siste dag er dagen før.
+                last = (date.fromisoformat(end) - timedelta(days=1)).isoformat()
+            except ValueError:
+                last = None
+            code = item.get("absenceCode") if isinstance(item.get("absenceCode"), dict) else {}
+            out.append({
+                "absenceId": item.get("absenceId"),
+                "organizationalUnitId": item.get("organizationalUnitId"),
+                "fromDate": start or None, "lastDay": last,
+                "absenceCode": code.get("name"), "note": item.get("note"),
+                "isDeletable": item.get("isDeletable") is True,
+                "registeredTime": item.get("registeredTime"),
+            })
+        return {"childId": child_id, "absences": out}
+
+    def delete_childcare_absence(self, child_id: str, absence_id: str) -> dict:
+        """Slett barnehagefråvær når appen ville tillate det (isDeletable)."""
+        if not isinstance(absence_id, str) or not absence_id.strip():
+            raise ValueError("absence_id må vere utfylt.")
+        listed = next((a for a in self.childcare_absences(child_id)["absences"]
+                       if a["absenceId"] == absence_id), None)
+        if listed is None or not listed["organizationalUnitId"]:
+            raise ValueError("Fann ikkje fråværet for barnet; bruk absenceId frå "
+                             "list_childcare_absences.")
+        unit = listed["organizationalUnitId"]
+        detail = self.get_json(f"/api/absences/{quote(absence_id, safe='')}",
+                               params={"organizationalUnitId": unit})
+        if not isinstance(detail, dict) or detail.get("childId") != child_id:
+            raise ValueError("Fråværet høyrer ikkje til barnet.")
+        if detail.get("isDeletable") is not True:
+            raise ValueError("Vigilo tillèt ikkje å slette dette fråværet (isDeletable=false).")
+        self._delete_absence(absence_id, unit, "list_childcare_absences")
+        return {
+            "status": "deleted", "childId": child_id, "absenceId": absence_id,
+            "fromDate": listed["fromDate"], "lastDay": listed["lastDay"],
+            "verify": "Kontroller med list_childcare_absences.",
+        }
+
     # --- SFO-fråvær ---------------------------------------------------
     # Kartlagt frå Android 3.3.0-4 (CreateAbsenceViewModel.submitForOrgUnit):
     # éi registrering per vald SFO-eining, berre datoar og valfri merknad.
@@ -432,11 +595,7 @@ class VigiloClient:
             raise ValueError("Fråværet høyrer ikkje til barnet; bruk absenceId frå list_sfo_absences.")
         if detail.get("isDeletable") is not True:
             raise ValueError("Vigilo tillèt ikkje å slette dette fråværet (isDeletable=false).")
-        self._write_json(
-            "DELETE", f"/api/absences/{quote(absence_id, safe='')}?"
-            + urlencode({"organizationalUnitId": unit}), retry_401=True,
-            outcome="Fråværet kan vere sletta. Kontroller list_sfo_absences",
-        )
+        self._delete_absence(absence_id, unit, "list_sfo_absences")
         return {
             "status": "deleted", "childId": child_id, "absenceId": absence_id,
             "fromDate": str(detail.get("fromDate") or "")[:10] or None,

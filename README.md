@@ -275,8 +275,12 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `send_message` | Send ny melding med tittel, tekst og eksplisitt valgte mottakere |
 | `reply_message` | Send svar i en eksisterende ordinær meldingstråd |
 | `register_student_absence` | Registrer skolefravær med periode, tittel, begrunnelse og valgte mottakere |
+| `list_school_absences` | Skolefravær med `absenceId`, siste fraværsdag og `canEdit` |
+| `update_student_absence` | Endre perioden for et skolefravær som kan endres |
 | `absence_codes` | Aktive fraværskoder for valgt barnehage |
 | `register_childcare_absence` | Registrer barnehagefravær med periode, aktiv kode og valgfri merknad |
+| `list_childcare_absences` | Barnehagefravær med kode, siste fraværsdag og `isDeletable` |
+| `delete_childcare_absence` | Slett barnehagefravær som Vigilo merker `isDeletable` |
 | `list_sfo_absences` | SFO-fravær for et barn med siste fraværsdag og `isDeletable` |
 | `register_sfo_absence` | Registrer SFO-fravær med periode og valgfri merknad |
 | `delete_sfo_absence` | Slett SFO-fravær som Vigilo merker `isDeletable` |
@@ -513,6 +517,25 @@ kontaktens `id`, ikke `employeeId`; lærere/administrasjon sendes som `employee`
 foresatte som `legalGuardian`. Skoleverktøyet støtter foreløpig ikke vedlegg eller SFO.
 Tittel, begrunnelse og minst én mottaker kreves lokalt; alle
 backend-valideringsregler er ennå ikke verifisert.
+
+`update_student_absence` endrer bare perioden, som appens
+`EditAbsenceBottomSheetViewModel`: `PUT /api/student-absences/{id}` med
+`organizationalUnitId` og `fromDate`/`toDate` som `yyyy-MM-dd` (ikke `dd.MM.yyyy` som ved
+oppretting), eksklusiv sluttdato dagen etter. Fraværet finnes via `list_school_absences`
+(`GET /api/student-absences?studentIds=&pageSize=50&includeAfterSchoolAbsences=false`) og
+leses på nytt med `GET /api/student-absences/{id}?organizationalUnitId=`. Endring krever
+`isEditable` og at det ikke er en fraværsmelding fra skolen
+(`messageThreadType=absenceNotificationMessage`). HTTP 400 tolkes som overlapp, som i appen.
+Detaljsvaret har barnet i `student.id`, ikke `childId`. Live-verifisert 31.10.2026: en dag
+utvidet til to og tilbake, begge HTTP 204 og riktig periode ved tilbake-lesing. Vigilo gir
+fraværet **ny `absenceId` ved hver endring**, så hent den på nytt før neste endring.
+
+`delete_childcare_absence` finner fraværet i `list_childcare_absences`
+(`GET /api/absences?childIds=&pageSize=50`; Vigilo svarer HTTP 500 for barn uten
+barnehage, så det avvises lokalt), leser `GET /api/absences/{id}?organizationalUnitId=`,
+krever riktig `childId` og `isDeletable`, og sender `DELETE /api/absences/{id}?organizationalUnitId=`.
+Live-verifisert 31.10.2026: «Fri» én dag registrert (HTTP 201), slettet (HTTP 204) og borte
+ved tilbake-lesing.
 
 SFO-fravær bruker `register_sfo_absence`, som appens `RegisterSfoAbsenceUseCase`:
 `POST /api/after-school-absences` med `childId`, SFO-enhetens `organizationalUnitId`,
