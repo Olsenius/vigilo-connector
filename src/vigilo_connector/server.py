@@ -445,40 +445,49 @@ def message_contacts(child_id: str, organizational_unit_id: str) -> str:
                       ensure_ascii=False, indent=2)
 
 
+Attachments = Annotated[list[dict[str, str]] | None, Field(description=(
+    "Valfrie vedlegg: [{name, dataBase64}]. Filtypen kjem frå filendinga (pdf, jpg, png, "
+    "gif, txt, rtf, csv, doc/docx, odt, xls/xlsx, ods, ppt/pptx, odp), høgst 10 filer "
+    "under 5 120 000 byte kvar, som i appen."))]
+
+
 def send_message(
     child_id: str, organizational_unit_id: str, title: str, body: str,
-    recipients: list[dict[str, str]],
+    recipients: list[dict[str, str]], attachments: Attachments = None,
 ) -> str:
     """Send ny melding når brukeren har bestilt konkret innhold og mottakere.
 
     Hent message_contacts først. Minst én ansatt kreves; foresatte kan inkluderes.
-    Ingen vedlegg. Ved ukjent resultat: sjekk meldingstrådene før nytt forsøk.
+    Ved ukjent resultat: sjekk meldingstrådene før nytt forsøk.
     """
     return _json(client().send_message(
-        child_id, organizational_unit_id, title, body, recipients,
+        child_id, organizational_unit_id, title, body, recipients, attachments,
     ), ensure_ascii=False, indent=2)
 
 
-def reply_message(thread_uid: str, body: str) -> str:
+def reply_message(thread_uid: str, body: str, attachments: Attachments = None) -> str:
     """Send bestilt svar i en ordinær meldingstråd fra get_message_thread.
 
-    Ingen vedlegg eller fraværstråder. Ved ukjent resultat: les tråden før nytt forsøk.
+    Ikke fraværstråder (bruk reply_absence_thread). Ved ukjent resultat: les tråden
+    før nytt forsøk.
     """
-    return _json(client().reply_message(thread_uid, body), ensure_ascii=False, indent=2)
+    return _json(client().reply_message(thread_uid, body, attachments),
+                 ensure_ascii=False, indent=2)
 
 
 def register_student_absence(
     child_id: str, organizational_unit_id: str, from_date: str, to_date: str,
-    note: str, title: str, recipients: list[dict[str, str]],
+    note: str, title: str, recipients: list[dict[str, str]], attachments: Attachments = None,
 ) -> str:
     """Registrer skolefravær når brukeren har bestilt den konkrete registreringen.
 
     Datoer YYYY-MM-DD, inkludert begge dager. Krever tittel, begrunnelse og
-    eksplisitt valgte recipient-objekter fra message_contacts. Ingen vedlegg.
+    eksplisitt valgte recipient-objekter fra message_contacts.
     Ved ukjent resultat: kontroller fravær før nytt forsøk, aldri automatisk retry.
     """
     return _json(client().register_student_absence(
         child_id, organizational_unit_id, from_date, to_date, note, title, recipients,
+        attachments,
     ), ensure_ascii=False, indent=2)
 
 
@@ -537,13 +546,14 @@ def get_absence_thread(child_id: str, absence_id: str, page_id: int = 0) -> str:
                  ensure_ascii=False, indent=2)
 
 
-def reply_absence_thread(child_id: str, absence_id: str, body: str) -> str:
+def reply_absence_thread(child_id: str, absence_id: str, body: str,
+                         attachments: Attachments = None) -> str:
     """Svar i meldingstråden til eit skulefråvær når brukaren har bestilt det. Krev canReply=true.
 
-    Svaret går til skulen. Utan vedlegg. Ved ukjent resultat: kontroller
-    get_absence_thread, aldri automatisk nytt forsøk.
+    Svaret går til skulen. Ved ukjent resultat: kontroller get_absence_thread,
+    aldri automatisk nytt forsøk.
     """
-    return _json(client().reply_absence_thread(child_id, absence_id, body),
+    return _json(client().reply_absence_thread(child_id, absence_id, body, attachments),
                  ensure_ascii=False, indent=2)
 
 

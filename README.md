@@ -278,7 +278,7 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `list_school_absences` | Skolefravær med `absenceId`, siste fraværsdag og `canEdit` |
 | `update_student_absence` | Endre perioden for et skolefravær som kan endres |
 | `get_absence_thread` | Meldingstråden til et skolefravær, med `canReply` |
-| `reply_absence_thread` | Svar i meldingstråden til et skolefravær (uten vedlegg) |
+| `reply_absence_thread` | Svar i meldingstråden til et skolefravær |
 | `absence_codes` | Aktive fraværskoder for valgt barnehage |
 | `register_childcare_absence` | Registrer barnehagefravær med periode, aktiv kode og valgfri merknad |
 | `list_childcare_absences` | Barnehagefravær med kode, siste fraværsdag og `isDeletable` |
@@ -321,7 +321,17 @@ På wire legger connectoren automatisk til barnet først som
 gjør. Dette er barnets trådkontekst, ikke en bruker valgt mottakertype.
 Alle mottakere dedupliseres på kontakt-ID, som i appens mapper.
 Ingen sikker maksimumslengde for teksten er funnet i den lokale APK-analysen;
-vi finner derfor ikke på en lokal grense. Vedlegg er fortsatt ikke støttet.
+vi finner derfor ikke på en lokal grense.
+
+Vedlegg (`attachments`, valgfritt) støttes i `send_message`, `reply_message`,
+`register_student_absence` og `reply_absence_thread`. Hvert vedlegg er
+`{name, dataBase64}` og sendes som appens `AttachmentRequest`
+`{name, mimeType, dataBase64}` inne i samme JSON-kall; det finnes ingen egen
+opplastingsrute. `mimeType` er enum-navnet fra filendelsen, som i
+`FileUtils.getMimeType` (f.eks. `APP_PDF`, `IMAGE_JPEG`; `.pptx` blir `POWERPOINT`,
+som i appen), og ukjente filtyper avvises. Som appen tillates høyst 10 vedlegg, hvert
+under 5 120 000 byte. Appen komprimerer bilder før sending; det gjør ikke connectoren.
+En samlet grense for størrelse er ikke funnet. Vedlegg er ikke live-testet.
 Før svar hentes ordinære tråddetaljer. `threadUid` må stemme og
 `isReplyDisabled` må være eksplisitt `false`; manglende status avviser sending.
 Slettede tråder avvises også som en forsiktig connectorregel: appen viser
@@ -522,7 +532,7 @@ slik appen gjør. Dette ble live-verifisert ved registrering 25.12.2026 (HTTP 20
 og tilbake-lesing fra fraværsoversikten.
 Hent først `message_contacts` og velg individuelle `recipient`-objekter derfra. Bruk
 kontaktens `id`, ikke `employeeId`; lærere/administrasjon sendes som `employee`,
-foresatte som `legalGuardian`. Skoleverktøyet støtter foreløpig ikke vedlegg eller SFO.
+foresatte som `legalGuardian`. Skoleverktøyet støtter ikke SFO (bruk `register_sfo_absence`).
 Tittel, begrunnelse og minst én mottaker kreves lokalt; alle
 backend-valideringsregler er ennå ikke verifisert.
 

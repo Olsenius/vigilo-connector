@@ -6,6 +6,8 @@ fravær) legges til her etter hvert som de kartlegges — bruk `get()` /
 MCP-verktøyet `api_get` til å utforske.
 """
 
+import base64
+import binascii
 import io
 import hashlib
 import html
@@ -53,6 +55,55 @@ def iso_week(d: date | None = None) -> str:
     """ISO-uke på formatet Vigilo bruker, f.eks. "2026-38"."""
     y, w, _ = (d or date.today()).isocalendar()
     return f"{y}-{w:02d}"
+
+
+# Appen (FileUtils.getMimeType): filending -> AttachmentMimeTypeApiModel, sendt som
+# enum-namn (Gson utan adapter). Rekkjefølgja og "inneheld"-testen er appens, så
+# t.d. .pptx blir POWERPOINT. UNDEFINED blir avvist, som i appen.
+ATTACHMENT_TYPES = (
+    (("jpg", "jpeg"), "IMAGE_JPEG"), (("png",), "PNG"), (("pdf",), "APP_PDF"),
+    (("gif",), "GIF"), (("rtf",), "RTF"), (("csv",), "CSV"), (("txt",), "PLAIN"),
+    (("docx",), "DOCUMENT"), (("doc",), "MS_WORD"), (("odt",), "OPEN_DOC"),
+    (("xlsx",), "SHEET"), (("xls",), "EXCEL"), (("ods",), "SHEET_OPEN_OFFICE"),
+    (("ppt",), "POWERPOINT"), (("pptx",), "PRESENTATION"), (("odp",), "OPEN_PRESENTATION"),
+)
+MAX_ATTACHMENTS = 10                 # MessageThreadFragment.MAX_NUMBER_OF_ATTACHMENTS
+MAX_ATTACHMENT_BYTES = 5 * 1024000   # PickFileAttachmentUseCase: fil >= 5 "MB" blir avvist
+
+
+def _attachments(items) -> list[dict]:
+    """Vedlegg som appens AttachmentRequest: {name, mimeType, dataBase64}."""
+    if items is None:
+        return []
+    if not isinstance(items, list):
+        raise ValueError("attachments må vere ei liste med {name, dataBase64}.")
+    if len(items) > MAX_ATTACHMENTS:
+        raise ValueError(f"Høgst {MAX_ATTACHMENTS} vedlegg.")
+    out = []
+    for item in items:
+        if (not isinstance(item, dict) or set(item) != {"name", "dataBase64"}
+                or not isinstance(item["name"], str) or not item["name"].strip()
+                or not isinstance(item["dataBase64"], str)):
+            raise ValueError("Kvart vedlegg må ha name og dataBase64.")
+        name = item["name"].strip()
+        if any(c in name for c in "/\\\0") or name in (".", ".."):
+            raise ValueError("Ugyldig filnamn i vedlegg.")
+        extension = name.split(".")[-1].lower() if "." in name else ""
+        mime = next((m for keys, m in ATTACHMENT_TYPES
+                     if extension and any(k in extension for k in keys)), None)
+        if mime is None:
+            raise ValueError(f"Filtypen til {name} er ikkje støtta av Vigilo-appen.")
+        try:
+            data = base64.b64decode(item["dataBase64"], validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError(f"dataBase64 for {name} er ikkje gyldig base64.") from None
+        if not data:
+            raise ValueError(f"Vedlegget {name} er tomt.")
+        if len(data) >= MAX_ATTACHMENT_BYTES:
+            raise ValueError(f"Vedlegget {name} er for stort (grense {MAX_ATTACHMENT_BYTES} byte).")
+        out.append({"name": name, "mimeType": mime,
+                    "dataBase64": base64.b64encode(data).decode("ascii")})
+    return out
 
 
 def _pdf_to_text(data: bytes) -> str:
@@ -506,10 +557,12 @@ class VigiloClient:
             "messages": messages,
         }
 
-    def reply_absence_thread(self, child_id: str, absence_id: str, body: str) -> dict:
-        """Svar i meldingstråden til eit skulefråvær, utan vedlegg."""
+    def reply_absence_thread(self, child_id: str, absence_id: str, body: str,
+                             attachments: list[dict] | None = None) -> dict:
+        """Svar i meldingstråden til eit skulefråvær, eventuelt med vedlegg."""
         if not isinstance(body, str) or not body.strip():
             raise ValueError("body må vere utfylt.")
+        files = _attachments(attachments)
         context = self._absence_thread_context(child_id, absence_id)
         thread = self._absence_thread_page(child_id, absence_id, context["unit"],
                                            context["threadId"], None)
@@ -518,9 +571,10 @@ class VigiloClient:
                              "(isReplyDisabled, fråværsmelding frå skulen eller sletta).")
         self._post_message(
             f"/api/student-absence-message-threads/{quote(context['threadId'], safe='')}/reply",
-            {"body": body, "attachments": []})
+            {"body": body, "attachments": files})
         return {"status": "sent", "childId": child_id, "absenceId": absence_id,
                 "messageThreadId": context["threadId"],
+                "attachments": [f["name"] for f in files],
                 "verify": "Kontroller svaret med get_absence_thread."}
 
     # --- Samtykke (app-API) --------------------------------------------
@@ -832,13 +886,15 @@ class VigiloClient:
     def register_student_absence(
         self, child_id: str, organizational_unit_id: str, from_date: str,
         to_date: str, note: str, title: str, recipients: list[dict[str, str]],
+        attachments: list[dict] | None = None,
     ) -> dict:
-        """Opprett skolefravær uten vedlegg. Ingen automatisk retry ved transportfeil."""
+        """Opprett skolefravær, eventuelt med vedlegg. Ingen automatisk retry ved transportfeil."""
         for field, value in (("child_id", child_id), ("organizational_unit_id", organizational_unit_id),
                              ("note", note), ("title", title)):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field} må være utfylt.")
         start, end = _absence_dates(from_date, to_date)
+        files = _attachments(attachments)
         if not recipients:
             raise ValueError("Velg minst én mottaker fra message_contacts.")
         selected = []
@@ -852,7 +908,7 @@ class VigiloClient:
         payload = {
             "childId": child_id, "organizationalUnitId": organizational_unit_id,
             "fromDate": start, "toDate": end,
-            "note": note, "title": title, "attachments": [], "recipients": selected,
+            "note": note, "title": title, "attachments": files, "recipients": selected,
         }
         self._post_absence("/api/student-absences", payload)
         return {
@@ -874,13 +930,14 @@ class VigiloClient:
 
     def send_message(
         self, child_id: str, organizational_unit_id: str, title: str, body: str,
-        recipients: list[dict[str, str]],
+        recipients: list[dict[str, str]], attachments: list[dict] | None = None,
     ) -> dict:
-        """Ny melding uten vedlegg, til eksplisitte kontakter fra valgt barn/enhet."""
+        """Ny melding, eventuelt med vedlegg, til eksplisitte kontakter fra valgt barn/enhet."""
         for field, value in (("child_id", child_id), ("organizational_unit_id", organizational_unit_id),
                              ("title", title), ("body", body)):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field} må være utfylt.")
+        files = _attachments(attachments)
         if not isinstance(recipients, list) or not recipients:
             raise ValueError("Velg mottakere fra message_contacts, inkludert minst én ansatt.")
         selected = []
@@ -907,17 +964,20 @@ class VigiloClient:
         wire_recipients.extend(r for r in selected if r["externalId"] != child_id)
         self._post_message("/api/messages", {
             "organizationalUnitId": organizational_unit_id, "title": title, "body": body,
-            "attachments": [], "recipients": wire_recipients,
+            "attachments": files, "recipients": wire_recipients,
         })
-        return {"status": "sent", "childId": child_id, "title": title, "recipients": selected}
+        return {"status": "sent", "childId": child_id, "title": title, "recipients": selected,
+                "attachments": [f["name"] for f in files]}
 
-    def reply_message(self, thread_uid: str, body: str) -> dict:
-        """Svar i en eksisterende ordinær meldingstråd uten vedlegg."""
+    def reply_message(self, thread_uid: str, body: str,
+                      attachments: list[dict] | None = None) -> dict:
+        """Svar i en eksisterende ordinær meldingstråd, eventuelt med vedlegg."""
         for field, value in (("thread_uid", thread_uid), ("body", body)):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field} må være utfylt.")
         if thread_uid in (".", ".."):
             raise ValueError("Ugyldig thread_uid.")
+        files = _attachments(attachments)
         thread = self.get_thread(thread_uid)
         # Bare ordinært detaljendepunkt kan brukes for svar her. Fravær har
         # egne endepunkter og krever en separat, kartlagt skrivekontrakt.
@@ -928,9 +988,10 @@ class VigiloClient:
         if thread.get("isDeleted") is True:
             raise ValueError("En slettet meldingstråd kan ikke besvares.")
         self._post_message(f"/api/messages/{quote(thread_uid, safe='')}/reply", {
-            "body": body, "attachments": [],
+            "body": body, "attachments": files,
         })
-        return {"status": "sent", "threadUid": thread_uid}
+        return {"status": "sent", "threadUid": thread_uid,
+                "attachments": [f["name"] for f in files]}
 
     @staticmethod
     def _paging(page_size: int, page_id: int | None) -> dict:
