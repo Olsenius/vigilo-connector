@@ -1617,6 +1617,100 @@ class VigiloClient:
             "verify": "Kontroller at reply er null med list_registrations.",
         }
 
+    # --- Møteinvitasjonar (forms/meetings) --------------------------------
+    # Appen (MeetingDetailsViewModel, RxRestAPIService.submitMeetingOccurrenceResponse):
+    # éin POST per valt tidspunkt med {childPersonId, inviteePersonId=userId,
+    # meetingOccurrenceId}; avmelding er DELETE …/replies/{userId}/{childId}.
+    # Svar er ope når fristen manglar eller ikkje er passert, og berre ledige
+    # tidspunkt (eller det alt valde) kan veljast.
+
+    def meeting_invitations(self, child_id: str) -> dict:
+        """Møteinvitasjonar for barnet med tidspunkt, frist og eventuelt svar."""
+        if not isinstance(child_id, str) or not child_id.strip():
+            raise ValueError("child_id må vere utfylt.")
+        if not any(isinstance(c, dict) and c.get("childId") == child_id
+                   for c in self.get_children()):
+            raise ValueError("Fann ikkje barnet; bruk childId frå list_children.")
+        data = self.get_json(f"/api/forms/meetings/invitations/{quote(child_id, safe='')}")
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("Ugyldig svar frå Vigilo for møteinvitasjonar.")
+        now = datetime.now(ZoneInfo("UTC"))
+        out = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            deadline = self._registration_deadline(item)
+            item["canReply"] = (item.get("registrationDeadline") in (None, "")
+                                or (deadline is not None and deadline > now))
+            out.append(item)
+        return {"childId": child_id, "meetings": out}
+
+    def _open_meeting(self, child_id: str, meeting_id: str) -> dict:
+        if not isinstance(meeting_id, str) or not meeting_id.strip():
+            raise ValueError("meeting_id må vere utfylt.")
+        with self.fresh_reads(True):
+            items = self.meeting_invitations(child_id)["meetings"]
+        item = next((i for i in items if i.get("id") == meeting_id), None)
+        if item is None:
+            raise ValueError("Fann ikkje møteinvitasjonen for barnet; bruk id frå "
+                             "list_meeting_invitations.")
+        if item["canReply"] is not True:
+            raise ValueError("Fristen for møtet er passert; svaret kan ikkje endrast.")
+        return item
+
+    @staticmethod
+    def _meeting_reply_occurrence(item: dict) -> str | None:
+        reply = item.get("reply")
+        return reply.get("meetingOccurrenceId") if isinstance(reply, dict) else None
+
+    def reply_meeting(self, child_id: str, meeting_id: str, occurrence_id: str) -> dict:
+        """Vel eit tidspunkt i ein møteinvitasjon (POST …/replies) som appen."""
+        item = self._open_meeting(child_id, meeting_id)
+        if not isinstance(occurrence_id, str) or not occurrence_id.strip():
+            raise ValueError("occurrence_id må vere utfylt.")
+        occurrence = next((o for o in item.get("meetingOccurrences") or []
+                           if isinstance(o, dict) and o.get("meetingOccurrenceId") == occurrence_id),
+                          None)
+        if occurrence is None:
+            raise ValueError("Ukjent tidspunkt; bruk meetingOccurrenceId frå "
+                             "list_meeting_invitations.")
+        current = self._meeting_reply_occurrence(item)
+        if current == occurrence_id:
+            raise ValueError("Dette tidspunktet er alt valt.")
+        if occurrence.get("isAvailable") is not True:
+            raise ValueError("Tidspunktet er ikkje ledig lenger.")
+        self._write_json(
+            "POST", f"/api/forms/meetings/{quote(meeting_id, safe='')}/replies",
+            {"childPersonId": child_id, "inviteePersonId": self.user_id,
+             "meetingOccurrenceId": occurrence_id},
+            retry_401=True,
+            outcome="Svaret kan vere registrert. Kontroller list_meeting_invitations")
+        return {
+            "status": "replied", "childId": child_id, "meetingId": meeting_id,
+            "title": item.get("title"), "meetingOccurrenceId": occurrence_id,
+            "startTime": occurrence.get("startTime"), "endTime": occurrence.get("endTime"),
+            "replacedPreviousReply": current is not None,
+            "verify": "Kontroller reply med list_meeting_invitations.",
+        }
+
+    def withdraw_meeting_reply(self, child_id: str, meeting_id: str) -> dict:
+        """Meld av eit valt møtetidspunkt (DELETE …/replies/{userId}/{childId}) som appen."""
+        item = self._open_meeting(child_id, meeting_id)
+        if self._meeting_reply_occurrence(item) is None:
+            raise ValueError("Møtet har ikkje noko svar å trekkje tilbake.")
+        self._write_json(
+            "DELETE",
+            f"/api/forms/meetings/{quote(meeting_id, safe='')}/replies/"
+            f"{quote(self.user_id, safe='')}/{quote(child_id, safe='')}",
+            None, retry_401=True,
+            outcome="Svaret kan vere trekt tilbake. Kontroller list_meeting_invitations")
+        return {
+            "status": "withdrawn", "childId": child_id, "meetingId": meeting_id,
+            "title": item.get("title"),
+            "verify": "Kontroller at reply er null med list_meeting_invitations.",
+        }
+
     @staticmethod
     def _validation_codes(response: httpx.Response) -> list[str]:
         """Kodane i Vigilos ValidationError-svar (type og validationErrors[*].errorCode)."""

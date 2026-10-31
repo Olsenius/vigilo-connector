@@ -295,6 +295,9 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `list_registrations` | Påmeldingsskjema for et barn med valg, frist og eventuelt svar |
 | `reply_registration` | Svar på et påmeldingsskjema (erstatter tidligere svar) |
 | `withdraw_registration_reply` | Trekk tilbake svaret på et påmeldingsskjema |
+| `list_meeting_invitations` | Møteinvitasjoner med tidspunkt, ledighet, frist og svar |
+| `reply_meeting` | Velg et ledig tidspunkt i en møteinvitasjon |
+| `withdraw_meeting_reply` | Meld av et valgt møtetidspunkt |
 | `consent_forms` | Samtykkeskjemaer (krever `organizationalUnitId`) |
 | `list_consents` | Samtykkeskjemaer fra app-API-et med ditt svar, `canGive`/`canRevoke` |
 | `give_consent` | Gi samtykke for et barn |
@@ -556,6 +559,14 @@ Nei er `PUT /api/consents/{id}/revoke` uten body på din egen samtykke-ID, og ba
 samtykket er gitt. Uten tidligere svar sender appen ingenting for nei, så et avslag kan
 ikke registreres. Beskrivelser er HTML og gjøres om til tekst. Lesing er live-verifisert
 31.10.2026; skriving er ikke live-testet.
+
+`list_meeting_invitations`, `reply_meeting` og `withdraw_meeting_reply` følger appens
+`MeetingDetailsViewModel`: `GET /api/forms/meetings/invitations/{childId}`, svar med
+`POST /api/forms/meetings/{meetingId}/replies` og `{childPersonId, inviteePersonId,
+meetingOccurrenceId}` (`inviteePersonId` er `personId` fra JWT, som for påmeldinger), og
+avmelding med `DELETE /api/forms/meetings/{meetingId}/replies/{userId}/{childId}`. Svar er
+åpent når fristen mangler eller ikke er passert, og bare ledige tidspunkt kan velges. Lesing
+er live-verifisert 31.10.2026 (ingen invitasjoner); skriving er ikke live-testet.
 
 `delete_childcare_absence` finner fraværet i `list_childcare_absences`
 (`GET /api/absences?childIds=&pageSize=50`; Vigilo svarer HTTP 500 for barn uten

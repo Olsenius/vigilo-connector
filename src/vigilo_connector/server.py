@@ -267,6 +267,36 @@ def withdraw_registration_reply(child_id: str, registration_id: str) -> str:
                  ensure_ascii=False, indent=2)
 
 
+def list_meeting_invitations(child_id: str) -> str:
+    """Møteinvitasjonar (t.d. utviklingssamtale) for eit barn, med tidspunkt og eventuelt svar.
+
+    meetingOccurrences har meetingOccurrenceId, start/slutt (UTC) og isAvailable.
+    reply=null betyr ikkje svart. canReply=false når fristen er passert. Berre lesing.
+    """
+    return _json(client().meeting_invitations(child_id), ensure_ascii=False, indent=2)
+
+
+def reply_meeting(child_id: str, meeting_id: str, occurrence_id: str) -> str:
+    """Vel eit tidspunkt i ein møteinvitasjon når brukaren har bestilt det.
+
+    Tidspunktet må vere ledig (isAvailable) og fristen ikkje passert. Eit nytt val
+    erstattar det førre. Ved ukjent resultat: kontroller list_meeting_invitations,
+    aldri automatisk retry.
+    """
+    return _json(client().reply_meeting(child_id, meeting_id, occurrence_id),
+                 ensure_ascii=False, indent=2)
+
+
+def withdraw_meeting_reply(child_id: str, meeting_id: str) -> str:
+    """Meld av eit valt møtetidspunkt når brukaren har bestilt det.
+
+    Krev eit eksisterande svar og at fristen ikkje er passert. Ved ukjent
+    resultat: kontroller list_meeting_invitations, aldri automatisk retry.
+    """
+    return _json(client().withdraw_meeting_reply(child_id, meeting_id),
+                 ensure_ascii=False, indent=2)
+
+
 def read_message_attachments(thread_uid: str) -> str:
     """Last ned og les vedleggene i en meldingstråd (f.eks. ukeplan-PDF).
 
@@ -595,6 +625,9 @@ TOOLS = (
     list_registrations,
     reply_registration,
     withdraw_registration_reply,
+    list_meeting_invitations,
+    reply_meeting,
+    withdraw_meeting_reply,
     read_message_attachments,
     read_post_attachments,
     api_get,
