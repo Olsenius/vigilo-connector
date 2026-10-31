@@ -269,7 +269,7 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `message_participants` | Deltakere og trådstarter for valgt barn og ordinær tråd |
 | `read_message_attachments` | Last ned og les vedlegg i en meldingstråd (PDF/docx→tekst) |
 | `read_post_attachments` | Last ned og les vedlegg i et oppslag/«Siste nytt» (PDF/docx→tekst) — her ligger ofte ukeplanen |
-| `news_feed` | «Siste nytt» / oppslag for et barn |
+| `news_feed` | «Siste nytt» som i appen (oppslag, pedagogiske planar, rutinar), blar bakover med `before_date`; inn-/utsjekk skjult som standard |
 | `absences` | Fravær for et barn |
 | `message_contacts` | Kontaktliste for barn/skole med mottakerfeltene `type` og `externalId` |
 | `send_message` | Send ny melding med tittel, tekst og eksplisitt valgte mottakere |
@@ -497,7 +497,9 @@ nytt. `withdraw_registration_reply` sender
 `DELETE /api/forms/registrations/{id}/replies/{userId}/{childId}` og krever et
 eksisterende svar. Begge leser skjemaet på nytt og avviser etter fristen.
 Svar er live-verifisert 24.10.2026 (HTTP 200, svaret synlig ved
-tilbake-lesing); tilbaketrekking er ennå ikke live-verifisert. Kontroller alltid resultatet med `list_registrations`.
+tilbake-lesing); tilbaketrekking er ennå ikke live-verifisert.
+Etter fristen forsvinner skjemaet fra invitasjonslista (live 31.10.2026), så
+svar på lukkede påmeldinger kan ikke leses tilbake. Kontroller alltid resultatet med `list_registrations`.
 
 Skolefravær tar datoer som `YYYY-MM-DD` (begge dager inkludert).
 Ved sending konverteres siste fraværsdag til eksklusiv sluttdato dagen etter,
@@ -524,6 +526,15 @@ Ingen automatisk retry ved timeout, andre transportfeil eller HTTP 5xx; bare et 
 401-svar gir ett nytt forsøk med fornyet token. Suksess kan ha tom respons.
 Kontraktene bygger på Android APK 3.3.0-4, mock-tester og en autorisert
 produksjonsregistrering. Begge verktøy registreres lokalt og i gatewayen.
+
+`news_feed` bruker app-API-ets `GET /api/news-feed?childId=&lastDate=&minPageSize=`,
+som appens `NewsFeedRemoteMediator` (sidestørrelse 50). `lastDate` er en eksklusiv
+dag; Vigilo returnerer hele dager til minst `minPageSize` elementer, og inn-/utsjekk
+(`checkIn`/`checkOut`) teller med. Verktøyet skjuler dem som standard
+(`skippedCheckIns`) og gir `nextBeforeDate` = dagen til eldste element for neste side,
+slik appen blar. Live-verifisert 31.10.2026: skolebarn uten oppslag får bare inn-/utsjekk
+(også det gamle web-endepunktet gav da tom liste), barnehagebarn får `post` og
+`pedagogicalPlan`. `id` på et `post` brukes i `read_post_attachments`.
 
 ## Android-transport
 
@@ -552,7 +563,7 @@ identisk nettverkstrafikk.
 Base `https://web-parent.prod.vigilo-oas.no`, alle GET, Bearer-auth:
 
 - `/api/children/my` — barn (childId + `organizationalUnits`)
-- `/api/news-feed?childIds=&fromDate=&toDate=`
+- `/api/news-feed?childIds=&fromDate=&toDate=` (ikkje brukt lenger; `news_feed` går mot app-API-et)
 - `/api/message-threads?childIds=&fromDate=&toDate=`
 - `/api/absences?childIds=`
 - `/api/consent-forms?childId=&organizationalUnitId=`

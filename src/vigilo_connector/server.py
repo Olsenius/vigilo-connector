@@ -320,10 +320,16 @@ def web_list_children() -> str:
     return _json(client().children(), ensure_ascii=False, indent=2)
 
 
-def news_feed(child_id: str, from_date: str = "", to_date: str = "") -> str:
-    """Oppslag/«Siste nytt» for et barn. Datoer YYYY-MM-DD (default: siste 30 dager)."""
+def news_feed(child_id: str, before_date: str = "", page_size: int = 50,
+              include_check_ins: bool = False) -> str:
+    """«Siste nytt» for eit barn som i appen: oppslag (post), pedagogiske planar, rutinar.
+
+    Nyaste først, element før before_date (YYYY-MM-DD, eksklusiv; tom = i dag og eldre).
+    page_size 1–50 tel òg inn-/utsjekk, som er skjult med mindre include_check_ins=true.
+    Bla vidare med before_date=nextBeforeDate (null = ingen eldre). Vedlegg: read_post_attachments.
+    """
     return _json(
-        client().news_feed(child_id, from_date or None, to_date or None),
+        client().news_feed(child_id, before_date or None, page_size, include_check_ins),
         ensure_ascii=False, indent=2,
     )
 

@@ -1188,15 +1188,53 @@ class VigiloClient:
     def web_current_user(self) -> dict:
         return self.web_get_json("/api/current-user")
 
-    def news_feed(self, child_id: str, from_date: str | None = None, to_date: str | None = None) -> list:
-        """Oppslag/«Siste nytt» for et barn. Datoer på formatet YYYY-MM-DD."""
-        from_date = from_date or (date.today() - timedelta(days=30)).isoformat()
-        to_date = to_date or (date.today() + timedelta(days=1)).isoformat()
-        data = self.web_get_json(
-            "/api/news-feed",
-            params={"childIds": child_id, "fromDate": from_date, "toDate": to_date},
-        )
-        return data if isinstance(data, list) else data.get("items", [])
+    NEWS_CHECK_TYPES = ("checkIn", "checkOut")
+
+    def news_feed(self, child_id: str, before_date: str | None = None, page_size: int = 50,
+                  include_check_ins: bool = False) -> dict:
+        """«Siste nytt» som i appen (NewsFeedRemoteMediator): éi side bakover i tid.
+
+        lastDate er eksklusiv dag; Vigilo gir heile dagar til minst minPageSize
+        element (live 2026-10-31), og inn-/utsjekk tel med. Neste side: lastDate
+        = dagen til det eldste elementet, slik appen blar.
+        """
+        if not isinstance(child_id, str) or not child_id.strip():
+            raise ValueError("child_id må vere utfylt.")
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 50:
+            raise ValueError("page_size må vere 1–50.")
+        oslo = ZoneInfo("Europe/Oslo")
+        if before_date:
+            try:
+                last = date.fromisoformat(before_date)
+            except (TypeError, ValueError):
+                raise ValueError("before_date må vere YYYY-MM-DD.") from None
+        else:
+            last = datetime.now(oslo).date() + timedelta(days=1)
+        if not any(isinstance(c, dict) and c.get("childId") == child_id
+                   for c in self.get_children()):
+            raise ValueError("Fann ikkje barnet; bruk childId frå list_children.")
+        data = self.get_json("/api/news-feed", params={
+            "childId": child_id, "lastDate": last.isoformat(), "minPageSize": page_size})
+        if not isinstance(data, list):
+            raise ValueError("Ugyldig svar frå Vigilo for nyheiter.")
+        items = [i for i in data if isinstance(i, dict)]
+        oldest = None
+        for item in items:
+            try:
+                posted = datetime.fromisoformat(str(item.get("postedTime")).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            day = posted.astimezone(oslo).date() if posted.tzinfo else posted.date()
+            oldest = day if oldest is None or day < oldest else oldest
+        kept = [i for i in items if include_check_ins or i.get("type") not in self.NEWS_CHECK_TYPES]
+        return {
+            "childId": child_id,
+            "beforeDate": last.isoformat(),
+            "items": kept,
+            "skippedCheckIns": len(items) - len(kept),
+            # Færre enn bede om: Vigilo har ikkje eldre element.
+            "nextBeforeDate": oldest.isoformat() if oldest and len(items) >= page_size else None,
+        }
 
     def web_message_threads(
         self, child_id: str, from_date: str | None = None, to_date: str | None = None
