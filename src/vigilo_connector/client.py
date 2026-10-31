@@ -694,6 +694,70 @@ class VigiloClient:
         return {"status": "revoked", "childId": child_id, "consentFormId": consent_form_id,
                 "verify": "Kontroller myStatus med list_consents."}
 
+    # --- Markere som lest/sett (L1) --------------------------------------
+    # Appen sender berre «lest» (isRead=true) og aldri «ulest». Lesing gjennom
+    # andre verktøy markerer ingenting; dette er einaste vegen.
+
+    READ_KINDS = ("message_thread", "absence", "post", "routine", "consent_form")
+
+    def mark_read(self, kind: str, ids: list[str], child_id: str | None = None) -> dict:
+        """Marker meldingstråd, skulefråvær, oppslag, rutine eller samtykkeskjema som lest."""
+        if kind not in self.READ_KINDS:
+            raise ValueError("kind må vere ein av " + ", ".join(self.READ_KINDS) + ".")
+        if (not isinstance(ids, list) or not ids
+                or not all(isinstance(i, str) and i.strip() and i not in (".", "..") for i in ids)):
+            raise ValueError("ids må vere ei ikkje-tom liste med ID-ar.")
+        if len(set(ids)) != len(ids):
+            raise ValueError("ids kan ikkje innehalde same ID fleire gonger.")
+        # Appen markerer éin tråd/eitt fråvær/eitt oppslag om gongen.
+        if kind in ("message_thread", "absence", "post") and len(ids) != 1:
+            raise ValueError(f"{kind} tek nøyaktig éin ID per kall, som i appen.")
+        if len(ids) > 50:
+            raise ValueError("Høgst 50 ID-ar per kall.")
+        outcome = "Markeringa kan vere lagra. Kontroller isSeen/isRead"
+        if kind == "message_thread":
+            thread = self.get_thread(ids[0])
+            if not isinstance(thread, dict) or thread.get("threadUid") != ids[0]:
+                raise ValueError("Fann ikkje meldingstråden; bruk threadUid frå list_message_threads.")
+            self._write_json("PUT", f"/api/messages/threads/{quote(ids[0], safe='')}/read-status",
+                             {"isRead": True}, retry_401=True, outcome=outcome)
+        elif kind == "absence":
+            listed = next((a for a in self.school_absences(child_id or "")["absences"]
+                           if a["absenceId"] == ids[0]), None)
+            if listed is None or not listed["organizationalUnitId"]:
+                raise ValueError("Fann ikkje fråværet for barnet; bruk absenceId frå "
+                                 "list_school_absences.")
+            self._write_json(
+                "PUT", f"/api/student-absences/{quote(ids[0], safe='')}/read-status?"
+                + urlencode({"organizationalUnitId": listed["organizationalUnitId"]}),
+                {"isRead": True}, retry_401=True, outcome=outcome)
+        elif kind == "post":
+            if not isinstance(child_id, str) or not child_id.strip():
+                raise ValueError("child_id må vere utfylt for oppslag.")
+            post = self.get_json(f"/api/posts/{quote(ids[0], safe='')}")
+            if (not isinstance(post, dict) or post.get("id") != ids[0]
+                    or child_id not in (post.get("childIds") or [])):
+                raise ValueError("Fann ikkje oppslaget for barnet; bruk id frå news_feed.")
+            self._write_json("POST", "/api/post-viewings", {"postIds": ids},
+                             retry_401=True, outcome=outcome)
+        elif kind == "routine":
+            for routine_id in ids:
+                routine = self.get_json(f"/api/routines/{quote(routine_id, safe='')}")
+                if not isinstance(routine, dict) or routine.get("id") != routine_id:
+                    raise ValueError("Fann ikkje rutina; bruk id frå news_feed (type routine).")
+            self._write_json("POST", "/api/routine-viewings", {"routineIds": ids},
+                             retry_401=True, outcome=outcome)
+        else:
+            known = {f["consentFormId"] for unit in self.list_consents(child_id or "")["units"]
+                     for f in unit["forms"]}
+            if any(i not in known for i in ids):
+                raise ValueError("Fann ikkje samtykkeskjemaet for barnet; bruk consentFormId "
+                                 "frå list_consents.")
+            self._write_json("POST", "/api/consent-form-viewings",
+                             {"clientPersonId": child_id, "consentFormIds": ids},
+                             retry_401=True, outcome=outcome)
+        return {"status": "marked_read", "kind": kind, "ids": ids, "childId": child_id}
+
     # --- Barnehagefråvær: lesing og sletting ----------------------------
     # Appen: GET api/absences?childIds=&pageSize= og detaljar
     # GET api/absences/{id}?organizationalUnitId=; slett når isDeletable.

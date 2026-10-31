@@ -557,6 +557,22 @@ def reply_absence_thread(child_id: str, absence_id: str, body: str,
                  ensure_ascii=False, indent=2)
 
 
+def mark_read(
+    kind: Annotated[str, Field(description=(
+        "message_thread (threadUid), absence (absenceId frå list_school_absences), "
+        "post (id frå news_feed), routine (id frå news_feed) eller consent_form "
+        "(consentFormId frå list_consents)."))],
+    ids: list[str], child_id: str = "",
+) -> str:
+    """Marker som lest/sett i Vigilo når brukaren eksplisitt ber om det.
+
+    Andre verktøy markerer aldri noko som lest. message_thread, absence og post tek
+    éin ID per kall; routine og consent_form opptil 50. child_id trengst for absence,
+    post og consent_form. Vigilo har ingen «marker som ulest».
+    """
+    return _json(client().mark_read(kind, ids, child_id or None), ensure_ascii=False, indent=2)
+
+
 def list_childcare_absences(child_id: str) -> str:
     """Barnehagefråvær for eit barn, nyaste først (første side, opptil 50).
 
@@ -645,6 +661,7 @@ TOOLS = (
     news_feed,
     absences,
     consent_forms,
+    mark_read,
     list_consents,
     give_consent,
     revoke_consent,

@@ -15,6 +15,7 @@ EXPECTED = {
     "update_student_absence",
     "get_absence_thread",
     "reply_absence_thread",
+    "mark_read",
     "list_consents",
     "give_consent",
     "revoke_consent",

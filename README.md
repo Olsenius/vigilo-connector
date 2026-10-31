@@ -299,6 +299,7 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `reply_meeting` | Velg et ledig tidspunkt i en møteinvitasjon |
 | `withdraw_meeting_reply` | Meld av et valgt møtetidspunkt |
 | `consent_forms` | Samtykkeskjemaer (krever `organizationalUnitId`) |
+| `mark_read` | Marker tråd, skolefravær, oppslag, rutine eller samtykkeskjema som lest (bare på eksplisitt forespørsel) |
 | `list_consents` | Samtykkeskjemaer fra app-API-et med ditt svar, `canGive`/`canRevoke` |
 | `give_consent` | Gi samtykke for et barn |
 | `revoke_consent` | Trekk tilbake et gitt samtykke |
@@ -577,6 +578,21 @@ meetingOccurrenceId}` (`inviteePersonId` er `personId` fra JWT, som for påmeldi
 avmelding med `DELETE /api/forms/meetings/{meetingId}/replies/{userId}/{childId}`. Svar er
 åpent når fristen mangler eller ikke er passert, og bare ledige tidspunkt kan velges. Lesing
 er live-verifisert 31.10.2026 (ingen invitasjoner); skriving er ikke live-testet.
+
+`mark_read` er den eneste veien som markerer noe som lest; ingen leseverktøy gjør det.
+Som appen sendes bare «lest», aldri «ulest»:
+- `message_thread`: `PUT /api/messages/threads/{threadUid}/read-status` med `{isRead: true}`
+  etter at tråden er lest.
+- `absence`: `PUT /api/student-absences/{absenceId}/read-status?organizationalUnitId=` med
+  `{isRead: true}`; fraværet må finnes i `list_school_absences`.
+- `post`: `POST /api/post-viewings` med `{postIds: [id]}`; `GET /api/posts/{id}` må ha barnet i
+  `childIds` (live-verifisert 31.10.2026).
+- `routine`: `POST /api/routine-viewings` med `{routineIds}`; hver rutine sjekkes med
+  `GET /api/routines/{id}`.
+- `consent_form`: `POST /api/consent-form-viewings` med `{clientPersonId, consentFormIds}`;
+  skjemaene må finnes i `list_consents`.
+
+Tråd, fravær og oppslag tar én ID per kall, som appen. Selve markeringene er ikke live-testet.
 
 `delete_childcare_absence` finner fraværet i `list_childcare_absences`
 (`GET /api/absences?childIds=&pageSize=50`; Vigilo svarer HTTP 500 for barn uten
