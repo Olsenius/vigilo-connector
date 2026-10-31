@@ -375,6 +375,8 @@ class VigiloClient:
                 "fromDate": start or None, "lastDay": last,
                 "canEdit": self._school_absence_editable(item),
                 "fromSchool": item.get("messageThreadType") == "absenceNotificationMessage",
+                "messageThreadId": item.get("relatedMessageThreadId"),
+                "lastReplyDate": item.get("lastReplyDate"),
                 "timeCreated": item.get("timeCreated"),
             })
         return {"childId": child_id, "absences": out}
@@ -429,6 +431,96 @@ class VigiloClient:
             # Live 2026-10-31: Vigilo gir fråværet ny absenceId ved kvar endring.
             "verify": "Vigilo gir fråværet ny absenceId; hent han med list_school_absences.",
         }
+
+    # --- Skulefråvær: tråd og svar --------------------------------------
+    # Appen (AbsenceThreadViewModel, AbsenceCapabilitiesKt): tråden er
+    # relatedMessageThreadId; svar berre når isReplyDisabled=false og fråværet
+    # ikkje er ei fråværsmelding frå skulen. Svaret har ingen einingsparameter.
+
+    def _absence_thread_context(self, child_id: str, absence_id: str) -> dict:
+        if not isinstance(absence_id, str) or not absence_id.strip():
+            raise ValueError("absence_id må vere utfylt.")
+        listed = next((a for a in self.school_absences(child_id)["absences"]
+                       if a["absenceId"] == absence_id), None)
+        if listed is None or not listed["organizationalUnitId"]:
+            raise ValueError("Fann ikkje fråværet for barnet; bruk absenceId frå "
+                             "list_school_absences.")
+        unit = listed["organizationalUnitId"]
+        detail = self.get_json(f"/api/student-absences/{quote(absence_id, safe='')}",
+                               params={"organizationalUnitId": unit})
+        student = detail.get("student") if isinstance(detail, dict) else None
+        if not isinstance(student, dict) or student.get("id") != child_id:
+            raise ValueError("Fråværet høyrer ikkje til barnet.")
+        thread_id = detail.get("relatedMessageThreadId")
+        if not isinstance(thread_id, str) or not thread_id.strip() or thread_id in (".", ".."):
+            raise ValueError("Fråværet har ingen meldingstråd.")
+        return {"unit": unit, "detail": detail, "threadId": thread_id}
+
+    def _absence_thread_page(self, child_id: str, absence_id: str, unit: str,
+                             thread_id: str, page_id: int | None) -> dict:
+        params = {"organizationalUnitId": unit, "pageSize": 20}
+        if page_id is not None:
+            if type(page_id) is not int or page_id < 1:
+                raise ValueError("page_id må vere eit positivt heiltal.")
+            params["pageId"] = page_id
+        thread = self.get_json(
+            f"/api/student-absence-message-threads/{quote(thread_id, safe='')}", params=params)
+        child = thread.get("child") if isinstance(thread, dict) else None
+        if (not isinstance(child, dict) or child.get("id") != child_id
+                or thread.get("absenceId") != absence_id):
+            raise ValueError("Meldingstråden høyrer ikkje til fråværet for barnet.")
+        return thread
+
+    @staticmethod
+    def _absence_reply_allowed(detail: dict, thread: dict) -> bool:
+        return (detail.get("isReplyDisabled") is False and thread.get("isReplyDisabled") is False
+                and detail.get("messageThreadType") != "absenceNotificationMessage"
+                and detail.get("isMessageThreadDeleted") is not True
+                and not thread.get("absenceDeletedAt"))
+
+    def absence_thread(self, child_id: str, absence_id: str, page_id: int | None = None) -> dict:
+        """Meldingstråden til eit skulefråvær (GET /api/student-absence-message-threads/{id})."""
+        context = self._absence_thread_context(child_id, absence_id)
+        thread = self._absence_thread_page(child_id, absence_id, context["unit"],
+                                           context["threadId"], page_id)
+        messages = []
+        for item in thread.get("messages") or []:
+            if not isinstance(item, dict):
+                continue
+            sender = item.get("sender") if isinstance(item.get("sender"), dict) else {}
+            person = sender.get("person") if isinstance(sender.get("person"), dict) else {}
+            name = " ".join(str(person.get(k)) for k in ("firstName", "lastName")
+                            if person.get(k)) or None
+            messages.append({
+                "id": item.get("id"), "type": item.get("type"),
+                "createdAt": item.get("createdAt"), "sender": name,
+                "title": item.get("title"), "text": item.get("text"),
+                "attachmentCount": len(item.get("attachments") or []),
+            })
+        return {
+            "childId": child_id, "absenceId": absence_id,
+            "messageThreadId": context["threadId"], "pageId": thread.get("pageId"),
+            "numberOfParticipants": thread.get("numberOfParticipants"),
+            "canReply": self._absence_reply_allowed(context["detail"], thread),
+            "messages": messages,
+        }
+
+    def reply_absence_thread(self, child_id: str, absence_id: str, body: str) -> dict:
+        """Svar i meldingstråden til eit skulefråvær, utan vedlegg."""
+        if not isinstance(body, str) or not body.strip():
+            raise ValueError("body må vere utfylt.")
+        context = self._absence_thread_context(child_id, absence_id)
+        thread = self._absence_thread_page(child_id, absence_id, context["unit"],
+                                           context["threadId"], None)
+        if not self._absence_reply_allowed(context["detail"], thread):
+            raise ValueError("Vigilo tillèt ikkje svar i denne fråværstråden "
+                             "(isReplyDisabled, fråværsmelding frå skulen eller sletta).")
+        self._post_message(
+            f"/api/student-absence-message-threads/{quote(context['threadId'], safe='')}/reply",
+            {"body": body, "attachments": []})
+        return {"status": "sent", "childId": child_id, "absenceId": absence_id,
+                "messageThreadId": context["threadId"],
+                "verify": "Kontroller svaret med get_absence_thread."}
 
     # --- Barnehagefråvær: lesing og sletting ----------------------------
     # Appen: GET api/absences?childIds=&pageSize= og detaljar

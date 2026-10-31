@@ -13,6 +13,8 @@ EXPECTED = {
     "register_student_absence",
     "list_school_absences",
     "update_student_absence",
+    "get_absence_thread",
+    "reply_absence_thread",
     "list_sfo_absences",
     "register_sfo_absence",
     "delete_sfo_absence",

@@ -277,6 +277,8 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `register_student_absence` | Registrer skolefravær med periode, tittel, begrunnelse og valgte mottakere |
 | `list_school_absences` | Skolefravær med `absenceId`, siste fraværsdag og `canEdit` |
 | `update_student_absence` | Endre perioden for et skolefravær som kan endres |
+| `get_absence_thread` | Meldingstråden til et skolefravær, med `canReply` |
+| `reply_absence_thread` | Svar i meldingstråden til et skolefravær (uten vedlegg) |
 | `absence_codes` | Aktive fraværskoder for valgt barnehage |
 | `register_childcare_absence` | Registrer barnehagefravær med periode, aktiv kode og valgfri merknad |
 | `list_childcare_absences` | Barnehagefravær med kode, siste fraværsdag og `isDeletable` |
@@ -529,6 +531,16 @@ leses på nytt med `GET /api/student-absences/{id}?organizationalUnitId=`. Endri
 Detaljsvaret har barnet i `student.id`, ikke `childId`. Live-verifisert 31.10.2026: en dag
 utvidet til to og tilbake, begge HTTP 204 og riktig periode ved tilbake-lesing. Vigilo gir
 fraværet **ny `absenceId` ved hver endring**, så hent den på nytt før neste endring.
+
+`get_absence_thread` og `reply_absence_thread` følger appens `AbsenceThreadViewModel`:
+tråden er fraværets `relatedMessageThreadId` (lik `threadUId` i detaljsvaret), lest med
+`GET /api/student-absence-message-threads/{id}?organizationalUnitId=&pageSize=20[&pageId=]`.
+Tråden må ha `child.id` lik barnet og `absenceId` lik fraværet. Svar krever
+`isReplyDisabled=false` i både detalj- og trådsvar, at det ikke er en fraværsmelding fra
+skolen, og at verken tråd eller fravær er slettet (`AbsenceCapabilitiesKt`). Svaret er
+`POST /api/student-absence-message-threads/{id}/reply` med `{body, attachments: []}` og
+ingen enhetsparameter. Lesing er live-verifisert 31.10.2026; svar er ikke live-testet,
+siden det sendes til skolen.
 
 `delete_childcare_absence` finner fraværet i `list_childcare_absences`
 (`GET /api/absences?childIds=&pageSize=50`; Vigilo svarer HTTP 500 for barn uten

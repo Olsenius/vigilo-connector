@@ -469,6 +469,26 @@ def update_student_absence(child_id: str, absence_id: str, from_date: str, to_da
                  ensure_ascii=False, indent=2)
 
 
+def get_absence_thread(child_id: str, absence_id: str, page_id: int = 0) -> str:
+    """Meldingstråden til eit skulefråvær (absenceId frå list_school_absences).
+
+    canReply=true betyr at reply_absence_thread er tillate. Opptil 20 meldingar
+    per side; page_id 0 gir første side.
+    """
+    return _json(client().absence_thread(child_id, absence_id, page_id or None),
+                 ensure_ascii=False, indent=2)
+
+
+def reply_absence_thread(child_id: str, absence_id: str, body: str) -> str:
+    """Svar i meldingstråden til eit skulefråvær når brukaren har bestilt det. Krev canReply=true.
+
+    Svaret går til skulen. Utan vedlegg. Ved ukjent resultat: kontroller
+    get_absence_thread, aldri automatisk nytt forsøk.
+    """
+    return _json(client().reply_absence_thread(child_id, absence_id, body),
+                 ensure_ascii=False, indent=2)
+
+
 def list_childcare_absences(child_id: str) -> str:
     """Barnehagefråvær for eit barn, nyaste først (første side, opptil 50).
 
@@ -528,6 +548,8 @@ TOOLS = (
     register_student_absence,
     list_school_absences,
     update_student_absence,
+    get_absence_thread,
+    reply_absence_thread,
     list_sfo_absences,
     register_sfo_absence,
     delete_sfo_absence,
