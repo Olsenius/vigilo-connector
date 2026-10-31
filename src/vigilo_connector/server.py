@@ -449,6 +449,39 @@ def register_childcare_absence(
     ), ensure_ascii=False, indent=2)
 
 
+def list_sfo_absences(child_id: str, organizational_unit_id: str = "") -> str:
+    """SFO-fråvær for eit barn, nyaste først (første side, opptil 50 fråvær totalt).
+
+    lastDay er siste fråværsdag (inkludert). isDeletable=true betyr at
+    delete_sfo_absence er tillate. organizational_unit_id trengst berre ved fleire SFO-einingar.
+    """
+    return _json(client().sfo_absences(child_id, organizational_unit_id or None),
+                 ensure_ascii=False, indent=2)
+
+
+def register_sfo_absence(
+    child_id: str, from_date: str, to_date: str, note: str | None = None,
+    organizational_unit_id: str = "",
+) -> str:
+    """Registrer SFO-fråvær når brukaren har bestilt den konkrete handlinga.
+
+    Datoar YYYY-MM-DD, begge dagar inkluderte. note er valfri; ingen tittel,
+    mottakarar eller fråværskode. SFO-eininga blir funnen frå barnet.
+    Skulefråvær er eit eige kall (register_student_absence). Kontroller med
+    list_sfo_absences; ved ukjent resultat: aldri automatisk nytt forsøk.
+    """
+    return _json(client().register_sfo_absence(
+        child_id, from_date, to_date, note, organizational_unit_id or None,
+    ), ensure_ascii=False, indent=2)
+
+
+def delete_sfo_absence(child_id: str, absence_id: str, organizational_unit_id: str = "") -> str:
+    """Slett eit SFO-fråvær når brukaren har bestilt det. Krev isDeletable=true frå list_sfo_absences."""
+    return _json(client().delete_sfo_absence(
+        child_id, absence_id, organizational_unit_id or None,
+    ), ensure_ascii=False, indent=2)
+
+
 TOOLS = (
     send_message,
     reply_message,
@@ -456,6 +489,9 @@ TOOLS = (
     register_childcare_absence,
     message_contacts,
     register_student_absence,
+    list_sfo_absences,
+    register_sfo_absence,
+    delete_sfo_absence,
     list_children,
     list_message_threads,
     message_participants,

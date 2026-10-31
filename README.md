@@ -277,6 +277,9 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `register_student_absence` | Registrer skolefravær med periode, tittel, begrunnelse og valgte mottakere |
 | `absence_codes` | Aktive fraværskoder for valgt barnehage |
 | `register_childcare_absence` | Registrer barnehagefravær med periode, aktiv kode og valgfri merknad |
+| `list_sfo_absences` | SFO-fravær for et barn med siste fraværsdag og `isDeletable` |
+| `register_sfo_absence` | Registrer SFO-fravær med periode og valgfri merknad |
+| `delete_sfo_absence` | Slett SFO-fravær som Vigilo merker `isDeletable` |
 | `list_pickup_notes` | Hentemeldinger (SFO) for et barn i én kalendermåned, med barnets SFO-enheter |
 | `pickup_note_options` | Aktiverte kategorier, meldingstyper og registreringsfrister for en SFO-enhet |
 | `create_pickup_note` | Opprett hentemelding (SFO) for én periode, valgfritt ukentlig gjentatt |
@@ -510,6 +513,22 @@ kontaktens `id`, ikke `employeeId`; lærere/administrasjon sendes som `employee`
 foresatte som `legalGuardian`. Skoleverktøyet støtter foreløpig ikke vedlegg eller SFO.
 Tittel, begrunnelse og minst én mottaker kreves lokalt; alle
 backend-valideringsregler er ennå ikke verifisert.
+
+SFO-fravær bruker `register_sfo_absence`, som appens `RegisterSfoAbsenceUseCase`:
+`POST /api/after-school-absences` med `childId`, SFO-enhetens `organizationalUnitId`,
+`fromDate`/`toDate` som `dd.MM.yyyy` (eksklusiv sluttdato dagen etter) og valgfri
+`note`. Ingen tittel, mottakere eller fraværskode. Enheten finnes fra barnets
+`afterSchool`-enhet. I appen er skole og SFO separate valg i samme skjema, og hver
+valgt enhet blir en egen registrering. Feilkodene `absence_dates_overlapped_by_absence`
+og `absence_dates_overlapped_by_checkin` forklares. `list_sfo_absences` leser første
+side av `GET /api/student-absences?studentIds=&pageSize=50&includeAfterSchoolAbsences=true`
+og beholder `absenceType=afterSchool`; `lastDay` er `toDate` minus én dag (live-verifisert
+31.10.2026 mot eksisterende fravær). `delete_sfo_absence` leser
+`GET /api/after-school-absences/{id}?organizationalUnitId=` (barnet ligger i `student.id`,
+ikke `childId`), krever riktig barn og `isDeletable`, og sender
+`DELETE /api/absences/{id}?organizationalUnitId=`. Live-verifisert 31.10.2026 med én dag
+fram i tid: registrering HTTP 201 og synlig med `isDeletable=true`, sletting HTTP 204 og
+borte ved tilbake-lesing.
 
 Barnehagefravær bruker `register_childcare_absence`, med samme inkluderte
 ISO-datoperiode. Hent først `absence_codes(organizational_unit_id)` og velg

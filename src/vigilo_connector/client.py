@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 import re
 from datetime import date, datetime, timedelta
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -329,6 +329,118 @@ class VigiloClient:
             "organizationalUnitId": organizational_unit_id,
             "fromDate": from_date, "toDate": to_date,
             "absenceCode": {"id": selected["id"], "name": selected["name"]}, "note": note,
+        }
+
+    # --- SFO-fråvær ---------------------------------------------------
+    # Kartlagt frå Android 3.3.0-4 (CreateAbsenceViewModel.submitForOrgUnit):
+    # éi registrering per vald SFO-eining, berre datoar og valfri merknad.
+    SFO_ABSENCE_ERRORS = {
+        "absence_dates_overlapped_by_absence":
+            "Perioden overlappar eit fråvær som alt er registrert; sjå list_sfo_absences.",
+        "absence_dates_overlapped_by_checkin":
+            "Barnet er alt sjekka inn på SFO i perioden.",
+    }
+
+    def _sfo_unit(self, child_id: str, organizational_unit_id: str | None) -> str:
+        units = [u.get("id") for u in self._after_school_units(child_id)]
+        if organizational_unit_id:
+            if organizational_unit_id not in units:
+                raise ValueError("organizational_unit_id er ikkje ei SFO-eining for barnet.")
+            return organizational_unit_id
+        if not units:
+            raise ValueError("Barnet har inga SFO-eining.")
+        if len(units) > 1:
+            raise ValueError("Barnet har fleire SFO-einingar; oppgi organizational_unit_id.")
+        return units[0]
+
+    def sfo_absences(self, child_id: str, organizational_unit_id: str | None = None) -> dict:
+        """SFO-fråvær som i appens fråværsliste (student-absences med SFO), nyaste først."""
+        unit = self._sfo_unit(child_id, organizational_unit_id)
+        data = self.get_json("/api/student-absences", params={
+            "studentIds": child_id, "pageSize": 50, "includeAfterSchoolAbsences": "true"})
+        items = data.get("absences") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("Ugyldig svar frå Vigilo for fråvær.")
+        out = []
+        for item in items:
+            if not (isinstance(item, dict) and item.get("absenceType") == "afterSchool"
+                    and item.get("childId") == child_id
+                    and item.get("organizationalUnitId") == unit):
+                continue
+            start, end = (str(item.get(k) or "")[:10] for k in ("fromDate", "toDate"))
+            try:
+                # Vigilo lagrar toDate eksklusivt (live): siste dag er dagen før.
+                last = (date.fromisoformat(end) - timedelta(days=1)).isoformat()
+            except ValueError:
+                last = None
+            out.append({
+                "absenceId": item.get("absenceId"), "fromDate": start or None, "lastDay": last,
+                "note": item.get("note"), "isDeletable": item.get("isDeletable") is True,
+                "timeCreated": item.get("timeCreated"),
+            })
+        return {"childId": child_id, "organizationalUnitId": unit, "absences": out}
+
+    def register_sfo_absence(
+        self, child_id: str, from_date: str, to_date: str, note: str | None = None,
+        organizational_unit_id: str | None = None,
+    ) -> dict:
+        """SFO-fråvær (POST /api/after-school-absences) med eksklusiv sluttdato."""
+        if note is not None and not isinstance(note, str):
+            raise ValueError("note må vere tekst eller null.")
+        start, end = _absence_dates(from_date, to_date)
+        unit = self._sfo_unit(child_id, organizational_unit_id)
+        payload = {"childId": child_id, "organizationalUnitId": unit,
+                   "fromDate": start, "toDate": end}
+        if note is not None:
+            payload["note"] = note
+        try:
+            self._post_absence("/api/after-school-absences", payload)
+        except httpx.HTTPStatusError as error:
+            codes = self._validation_codes(error.response)
+            try:
+                body = error.response.json()
+            except ValueError:
+                body = None
+            # ErrorRegisterAbsence har errorCode på toppnivå.
+            if isinstance(body, dict) and isinstance(body.get("errorCode"), str):
+                codes.append(body["errorCode"])
+            known = [self.SFO_ABSENCE_ERRORS[c] for c in codes if c in self.SFO_ABSENCE_ERRORS]
+            if known:
+                raise ValueError("Vigilo avviste SFO-fråværet: " + known[0]) from None
+            codes = [c for c in codes if re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", c)]
+            if not codes:
+                raise
+            raise ValueError("Vigilo avviste SFO-fråværet: " + ", ".join(codes) + ".") from None
+        return {
+            "status": "registered", "childId": child_id, "organizationalUnitId": unit,
+            "fromDate": from_date, "toDate": to_date, "note": note,
+            "verify": "Kontroller med list_sfo_absences.",
+        }
+
+    def delete_sfo_absence(
+        self, child_id: str, absence_id: str, organizational_unit_id: str | None = None,
+    ) -> dict:
+        """Slett SFO-fråvær når appen ville tillate det (isDeletable)."""
+        if not isinstance(absence_id, str) or not absence_id.strip():
+            raise ValueError("absence_id må vere utfylt.")
+        unit = self._sfo_unit(child_id, organizational_unit_id)
+        detail = self.get_json(f"/api/after-school-absences/{quote(absence_id, safe='')}",
+                               params={"organizationalUnitId": unit})
+        # Detaljsvaret har barnet i student.id, ikkje childId (live 2026-10-31).
+        student = detail.get("student") if isinstance(detail, dict) else None
+        if not isinstance(student, dict) or student.get("id") != child_id:
+            raise ValueError("Fråværet høyrer ikkje til barnet; bruk absenceId frå list_sfo_absences.")
+        if detail.get("isDeletable") is not True:
+            raise ValueError("Vigilo tillèt ikkje å slette dette fråværet (isDeletable=false).")
+        self._write_json(
+            "DELETE", f"/api/absences/{quote(absence_id, safe='')}?"
+            + urlencode({"organizationalUnitId": unit}), retry_401=True,
+            outcome="Fråværet kan vere sletta. Kontroller list_sfo_absences",
+        )
+        return {
+            "status": "deleted", "childId": child_id, "absenceId": absence_id,
+            "fromDate": str(detail.get("fromDate") or "")[:10] or None,
+            "verify": "Kontroller med list_sfo_absences.",
         }
 
     def message_contacts(self, child_id: str, organizational_unit_id: str) -> dict:
