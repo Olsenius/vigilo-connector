@@ -296,6 +296,9 @@ klienter: stopp gatewayen og slett `/data/oauth.db`.
 | `reply_registration` | Svar på et påmeldingsskjema (erstatter tidligere svar) |
 | `withdraw_registration_reply` | Trekk tilbake svaret på et påmeldingsskjema |
 | `consent_forms` | Samtykkeskjemaer (krever `organizationalUnitId`) |
+| `list_consents` | Samtykkeskjemaer fra app-API-et med ditt svar, `canGive`/`canRevoke` |
+| `give_consent` | Gi samtykke for et barn |
+| `revoke_consent` | Trekk tilbake et gitt samtykke |
 | `timetable` | Timeplan/ukesplan for en ISO-uke |
 | `scheduling_events` | Prøver/aktiviteter i timeplanen for en uke |
 | `api_get` / `web_api_get` | Rått GET mot app- hhv. web-API-et — for kartlegging |
@@ -541,6 +544,18 @@ skolen, og at verken tråd eller fravær er slettet (`AbsenceCapabilitiesKt`). S
 `POST /api/student-absence-message-threads/{id}/reply` med `{body, attachments: []}` og
 ingen enhetsparameter. Lesing er live-verifisert 31.10.2026; svar er ikke live-testet,
 siden det sendes til skolen.
+
+`list_consents`, `give_consent` og `revoke_consent` følger appens
+`ConsentDetailsViewModel`. Skjemaene leses med
+`GET /api/consent-forms?childPersonId=&organizationalUnitId=` for hver skole- og
+barnehageenhet, og på nytt med `GET /api/consents?childPersonId=&consentFormId=` før
+skriving. Ditt svar er oppføringen i `consents[]` der `legalGuardian.person.id` er lik
+JWT-claimet `personId`; den har `id: null` til du har svart. Gi samtykke er
+`POST /api/consents` med `{childPersonId, consentFormId}` (også etter tilbaketrekking).
+Nei er `PUT /api/consents/{id}/revoke` uten body på din egen samtykke-ID, og bare når
+samtykket er gitt. Uten tidligere svar sender appen ingenting for nei, så et avslag kan
+ikke registreres. Beskrivelser er HTML og gjøres om til tekst. Lesing er live-verifisert
+31.10.2026; skriving er ikke live-testet.
 
 `delete_childcare_absence` finner fraværet i `list_childcare_absences`
 (`GET /api/absences?childIds=&pageSize=50`; Vigilo svarer HTTP 500 for barn uten

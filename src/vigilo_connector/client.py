@@ -8,6 +8,7 @@ MCP-verktøyet `api_get` til å utforske.
 
 import io
 import hashlib
+import html
 import json
 import math
 import threading
@@ -521,6 +522,123 @@ class VigiloClient:
         return {"status": "sent", "childId": child_id, "absenceId": absence_id,
                 "messageThreadId": context["threadId"],
                 "verify": "Kontroller svaret med get_absence_thread."}
+
+    # --- Samtykke (app-API) --------------------------------------------
+    # Appen (ConsentDetailsViewModel): eige svar er consents[] der
+    # legalGuardian.person = innlogga brukar. Godta = POST /api/consents
+    # {childPersonId, consentFormId}. Nei = PUT /api/consents/{id}/revoke på
+    # eige samtykke, berre når det har id (er godtatt); utan tidlegare svar
+    # sender appen ingenting for nei.
+
+    @staticmethod
+    def _html_text(value) -> str | None:
+        if not isinstance(value, str):
+            return None
+        text = re.sub(r"(?i)<br\s*/?>|</p>|</li>|</div>", "\n", value)
+        text = html.unescape(re.sub(r"<[^>]+>", "", text))
+        return re.sub(r"\n{3,}", "\n\n", re.sub(r"[ \t]+", " ", text)).strip()
+
+    def _consent_units(self, child_id: str, organizational_unit_id: str | None) -> list[str]:
+        if not isinstance(child_id, str) or not child_id.strip():
+            raise ValueError("child_id må vere utfylt.")
+        child = next((c for c in self.get_children()
+                      if isinstance(c, dict) and c.get("childId") == child_id), None)
+        if child is None:
+            raise ValueError("Fann ikkje barnet; bruk childId frå list_children.")
+        units = [u.get("id") for u in child.get("organizationalUnits") or []
+                 if isinstance(u, dict) and u.get("type") in ("school", "childcare")
+                 and isinstance(u.get("id"), str)]
+        if organizational_unit_id:
+            if organizational_unit_id not in units:
+                raise ValueError("organizational_unit_id er ikkje ei skule- eller "
+                                 "barnehageeining for barnet.")
+            return [organizational_unit_id]
+        return units
+
+    def _my_consent(self, form: dict) -> dict | None:
+        me = self.user_id
+        return next((c for c in form.get("consents") or []
+                     if isinstance(c, dict) and isinstance(c.get("legalGuardian"), dict)
+                     and isinstance(c["legalGuardian"].get("person"), dict)
+                     and c["legalGuardian"]["person"].get("id") == me), None)
+
+    def _consent_summary(self, form: dict, unit: str | None) -> dict:
+        mine = self._my_consent(form)
+        my_status = (mine or {}).get("status") or "noResponse"
+        others = []
+        for c in form.get("consents") or []:
+            if not isinstance(c, dict) or c is mine:
+                continue
+            guardian = c.get("legalGuardian") if isinstance(c.get("legalGuardian"), dict) else {}
+            person = guardian.get("person") if isinstance(guardian.get("person"), dict) else {}
+            name = " ".join(str(person.get(k)) for k in ("firstName", "lastName")
+                            if person.get(k)) or None
+            others.append({"name": name, "status": c.get("status")})
+        return {
+            "consentFormId": form.get("id"), "organizationalUnitId": unit,
+            "description": self._html_text(form.get("description")),
+            "formStatus": form.get("status"), "isRead": form.get("isRead"),
+            "myStatus": my_status, "otherGuardians": others,
+            "canGive": mine is not None and my_status != "accepted",
+            "canRevoke": mine is not None and my_status == "accepted" and bool(mine.get("id")),
+            "updatedAt": form.get("updatedAt"),
+        }
+
+    def list_consents(self, child_id: str, organizational_unit_id: str | None = None) -> dict:
+        """Samtykkeskjema for barnet med eige svar (GET /api/consent-forms)."""
+        out = []
+        for unit in self._consent_units(child_id, organizational_unit_id):
+            data = self.get_json("/api/consent-forms", params={
+                "childPersonId": child_id, "organizationalUnitId": unit})
+            forms = data.get("consentForms") if isinstance(data, dict) else None
+            if not isinstance(forms, list):
+                raise ValueError("Ugyldig svar frå Vigilo for samtykke.")
+            info = data.get("consentInformation") if isinstance(data, dict) else None
+            out.append({
+                "organizationalUnitId": unit,
+                "information": self._html_text((info or {}).get("text")),
+                "forms": [self._consent_summary(f, unit) for f in forms if isinstance(f, dict)],
+            })
+        return {"childId": child_id, "units": out}
+
+    def _consent_form(self, child_id: str, consent_form_id: str) -> dict:
+        if not isinstance(consent_form_id, str) or not consent_form_id.strip():
+            raise ValueError("consent_form_id må vere utfylt.")
+        self._consent_units(child_id, None)
+        form = self.get_json("/api/consents", params={
+            "childPersonId": child_id, "consentFormId": consent_form_id})
+        if not isinstance(form, dict) or form.get("id") != consent_form_id:
+            raise ValueError("Fann ikkje samtykkeskjemaet for barnet; bruk consentFormId "
+                             "frå list_consents.")
+        if self._my_consent(form) is None:
+            raise ValueError("Du står ikkje som føresett på dette samtykkeskjemaet.")
+        return form
+
+    def give_consent(self, child_id: str, consent_form_id: str) -> dict:
+        """Gi samtykke for barnet (POST /api/consents)."""
+        summary = self._consent_summary(self._consent_form(child_id, consent_form_id), None)
+        if not summary["canGive"]:
+            raise ValueError("Du har alt gitt dette samtykket.")
+        self._write_json(
+            "POST", "/api/consents",
+            {"childPersonId": child_id, "consentFormId": consent_form_id}, retry_401=True,
+            outcome="Samtykket kan vere gitt. Kontroller list_consents")
+        return {"status": "accepted", "childId": child_id, "consentFormId": consent_form_id,
+                "verify": "Kontroller myStatus med list_consents."}
+
+    def revoke_consent(self, child_id: str, consent_form_id: str) -> dict:
+        """Trekk tilbake eit gitt samtykke (PUT /api/consents/{id}/revoke)."""
+        form = self._consent_form(child_id, consent_form_id)
+        summary = self._consent_summary(form, None)
+        if not summary["canRevoke"]:
+            raise ValueError("Berre eit gitt samtykke kan trekkjast tilbake. Utan tidlegare "
+                             "svar registrerer appen ikkje noko nei.")
+        consent_id = self._my_consent(form)["id"]
+        self._write_json(
+            "PUT", f"/api/consents/{quote(str(consent_id), safe='')}/revoke", None,
+            retry_401=True, outcome="Samtykket kan vere trekt tilbake. Kontroller list_consents")
+        return {"status": "revoked", "childId": child_id, "consentFormId": consent_form_id,
+                "verify": "Kontroller myStatus med list_consents."}
 
     # --- Barnehagefråvær: lesing og sletting ----------------------------
     # Appen: GET api/absences?childIds=&pageSize= og detaljar

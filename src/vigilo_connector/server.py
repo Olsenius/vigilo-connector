@@ -346,6 +346,34 @@ def consent_forms(child_id: str, organizational_unit_id: str) -> str:
     )
 
 
+def list_consents(child_id: str, organizational_unit_id: str = "") -> str:
+    """Samtykkeskjema for eit barn frå app-API-et, med ditt svar (myStatus).
+
+    canGive=true betyr at give_consent er tillate; canRevoke=true at revoke_consent er
+    tillate. Utan organizational_unit_id: alle skule- og barnehageeiningar for barnet.
+    """
+    return _json(client().list_consents(child_id, organizational_unit_id or None),
+                 ensure_ascii=False, indent=2)
+
+
+def give_consent(child_id: str, consent_form_id: str) -> str:
+    """Gi samtykke for barnet når brukaren har bestilt det. Krev canGive=true.
+
+    Ved ukjent resultat: kontroller list_consents, aldri automatisk nytt forsøk.
+    """
+    return _json(client().give_consent(child_id, consent_form_id), ensure_ascii=False, indent=2)
+
+
+def revoke_consent(child_id: str, consent_form_id: str) -> str:
+    """Trekk tilbake eit gitt samtykke når brukaren har bestilt det. Krev canRevoke=true.
+
+    Eit nei utan tidlegare samtykke blir ikkje registrert i appen og kan ikkje sendast.
+    Ved ukjent resultat: kontroller list_consents, aldri automatisk nytt forsøk.
+    """
+    return _json(client().revoke_consent(child_id, consent_form_id),
+                 ensure_ascii=False, indent=2)
+
+
 def timetable(child_id: str, organizational_unit_id: str, week: str = "") -> str:
     """Timeplan/ukesplan for en ISO-uke ("YYYY-WW", default inneværende uke)."""
     return _json(
@@ -574,6 +602,9 @@ TOOLS = (
     news_feed,
     absences,
     consent_forms,
+    list_consents,
+    give_consent,
+    revoke_consent,
     timetable,
     scheduling_events,
     web_api_get,
