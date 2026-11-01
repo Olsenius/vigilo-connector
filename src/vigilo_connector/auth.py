@@ -5,7 +5,7 @@ går til et custom app-scheme som nettlesere ikke kan følge, så koden må
 copy-pastes fra den feilede adressen (se README og `login.py`).
 
 Refresh-tokens roterer ved bruk og utløper etter 30-90 dager; da må
-`vigilo-login` kjøres på nytt.
+innlogginga blir gjort på nytt gjennom gateway-admin.
 """
 
 from contextlib import contextmanager
@@ -156,7 +156,7 @@ def user_id_from_jwt(access_token: str) -> str:
     except (IndexError, ValueError, AttributeError):
         person_id = None
     if not isinstance(person_id, str) or not person_id:
-        raise AuthError("Access-tokenet manglar personId; kjør `vigilo-login` på nytt.")
+        raise AuthError("Access-tokenet manglar personId; logg inn på nytt gjennom gateway-admin.")
     return person_id
 
 
@@ -167,17 +167,18 @@ class TokenStore:
         self.path = path
         # Refresh-tokens roterer ved bruk: to samtidige refresh-kall med samme
         # token gir invalid_grant og kan miste det nye tokenet. Serialiser alt.
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def load(self) -> dict:
         if not self.path.exists():
-            raise AuthError(f"Ingen tokens i {self.path} — kjør `vigilo-login` først.")
+            raise AuthError(f"Ingen tokens i {self.path} — logg inn gjennom gateway-admin først.")
         return json.loads(self.path.read_text())
 
     def save(self, tokens: dict) -> None:
         tokens = dict(tokens)
         tokens["obtained_at"] = time.time()
-        write_json_atomic(self.path, tokens)
+        with self._lock:
+            write_json_atomic(self.path, tokens)
 
     def access_token(self, force_refresh: bool = False) -> str:
         remaining = _auth_remaining()
@@ -191,7 +192,7 @@ class TokenStore:
             if force_refresh or time.time() > expires_at - EXPIRY_MARGIN:
                 refresh_token = tokens.get("refresh_token")
                 if not refresh_token:
-                    raise AuthError("Mangler refresh-token — kjør `vigilo-login` på nytt.")
+                    raise AuthError("Mangler refresh-token — logg inn på nytt gjennom gateway-admin.")
                 new_tokens = refresh(refresh_token)
                 tokens.update(new_tokens)
                 self.save(tokens)

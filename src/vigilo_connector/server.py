@@ -7,6 +7,7 @@ endepunkter kan utforskes rett fra agenten før de blir egne verktøy.
 
 import functools
 import json
+import httpx
 from typing import Annotated
 
 from pydantic import Field
@@ -14,7 +15,9 @@ from pydantic import Field
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from .client import SearchIncomplete, VigiloClient
+from .client import SearchIncomplete, VigiloClient, WriteOutcomeUnknown
+from .auth import AuthError
+from .telemetry import tool as trace_tool
 
 from .output import sanitize as _sanitize, thread_summary as _thread_summary, verified_child_context
 
@@ -28,7 +31,13 @@ def _anticipated_errors(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except (ValueError, SearchIncomplete) as error:
+        except AuthError:
+            raise ToolError("Vigilo krev innlogging. Opne Vigilo-innstillingane i gateway-admin og logg inn på nytt.") from None
+        except httpx.HTTPStatusError as error:
+            raise ToolError(f"Vigilo svarte HTTP {error.response.status_code}.") from None
+        except httpx.TransportError:
+            raise ToolError("Fekk ikkje kontakt med Vigilo.") from None
+        except (ValueError, SearchIncomplete, WriteOutcomeUnknown) as error:
             raise ToolError(_sanitize(str(error))) from None
     return wrapper
 
@@ -689,16 +698,9 @@ def register_tools(server: MCPServer) -> None:
     (`vigilo_connector.gateway`), så verktøyene defineres ett sted.
     """
     for fn in TOOLS:
-        server.add_tool(_anticipated_errors(fn))
+        server.add_tool(trace_tool(_anticipated_errors(fn)))
 
 
+# Shared catalogue for offline schema checks; there is no stdio entrypoint.
 mcp = MCPServer("vigilo")
 register_tools(mcp)
-
-
-def main() -> None:
-    mcp.run()
-
-
-if __name__ == "__main__":
-    main()

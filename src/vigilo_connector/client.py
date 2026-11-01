@@ -238,7 +238,7 @@ class VigiloClient:
         def load():
             r = self.get(path, params=params, headers=headers)
             if r.status_code == 401:
-                raise AuthError("Fortsatt 401 etter token-fornyelse — kjør `vigilo-login` på nytt.")
+                raise AuthError("Fortsatt 401 etter token-fornyelse — logg inn på nytt gjennom gateway-admin.")
             r.raise_for_status()
             return r.json()
 
@@ -277,7 +277,7 @@ class VigiloClient:
         r = self.web_get(path, params=params)
         if r.status_code == 401:
             raise AuthError(
-                "401 fra web-API-et. Enten er tokenet utløpt (kjør `vigilo-login`), "
+                "401 fra web-API-et. Enten er tokenet utløpt (opne gateway-admin), "
                 "eller så aksepterer ikke web-API-et app-tokenet — se README."
             )
         r.raise_for_status()
@@ -323,7 +323,7 @@ class VigiloClient:
         correlation = (f" Korrelasjons-ID: {correlation_id}."
                        if re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", correlation_id) else "")
         if response.status_code == 401:
-            raise AuthError("401 fra Vigilo — kjør `vigilo-login` på nytt." + correlation)
+            raise AuthError("401 fra Vigilo — logg inn på nytt gjennom gateway-admin." + correlation)
         if 300 <= response.status_code < 400 or response.status_code >= 500:
             raise WriteOutcomeUnknown(
                 f"Vigilo svarte HTTP {response.status_code}. {outcome} før et nytt forsøk; "

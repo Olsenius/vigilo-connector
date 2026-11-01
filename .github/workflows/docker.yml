@@ -51,7 +51,7 @@ jobs:
         with:
           context: .
           load: true
-          tags: vigilo-gateway:ci
+          tags: vigilo-mcp:ci
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Røyktest
@@ -59,11 +59,28 @@ jobs:
           set -euo pipefail
           trap 'docker logs smoke; docker rm -f smoke' EXIT
           docker run -d --name smoke --read-only --tmpfs /tmp \
-            -e HOST=0.0.0.0 -e PUBLIC_URL=https://vigilo.example -p 8000:8000 vigilo-gateway:ci
-          for i in $(seq 1 30); do curl -fs localhost:8000/healthz && break; sleep 1; done
-          curl -fs localhost:8000/healthz
-          curl -fs -H 'Host: vigilo.example' localhost:8000/.well-known/oauth-authorization-server
-          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Host: vigilo.example' localhost:8000/mcp)" = 401
+            -e MCP_AUTH_TOKEN=ci-synthetic-internal-token \
+            -p 127.0.0.1:8080:8080 vigilo-mcp:ci
+          for i in $(seq 1 30); do curl -fs localhost:8080/healthz && break; sleep 1; done
+          curl -fs localhost:8080/healthz
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/mcp)" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/config)" = 401
+          curl -fs -H 'Authorization: Bearer ci-synthetic-internal-token' localhost:8080/config
+          curl -fs -H 'Authorization: Bearer ci-synthetic-internal-token' \
+            -H 'Accept: application/json, text/event-stream' -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+            localhost:8080/mcp > /tmp/vigilo-tools-response
+          python3 - <<'PYTHON'
+          import json
+          from pathlib import Path
+          raw = Path('/tmp/vigilo-tools-response').read_text()
+          payload = json.loads(raw) if raw.lstrip().startswith('{') else json.loads(
+              [line[5:].strip() for line in raw.splitlines() if line.startswith('data:')][-1]
+          )
+          tools = payload['result']['tools']
+          assert len(tools) == 47, len(tools)
+          assert any(tool['name'] == 'list_children' for tool in tools)
+          PYTHON
           docker logs smoke 2>&1 | grep -q 'Uvicorn running'
 
       - name: Logg inn på GHCR
@@ -82,7 +99,7 @@ jobs:
         run: |
           set -euo pipefail
           image="ghcr.io/${REPOSITORY,,}:${GITHUB_SHA}-${ARCH}"
-          docker tag vigilo-gateway:ci "$image"
+          docker tag vigilo-mcp:ci "$image"
           docker push "$image"
 
   publish:

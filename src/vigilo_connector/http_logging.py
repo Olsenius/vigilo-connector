@@ -10,6 +10,8 @@ import time
 import uuid
 
 import httpx
+from .telemetry import span
+from opentelemetry.trace import SpanKind, Status, StatusCode
 
 _OUTPUT_LOCK = threading.Lock()
 _EXTENSION = 'vigilo_http_log'
@@ -137,18 +139,29 @@ class LoggedClient(httpx.Client):
         hooks = {key: list(value) for key, value in (kwargs.pop('event_hooks', None) or {}).items()}
         hooks.setdefault('request', []).append(lambda request: _request_log(request, origin))
         hooks.setdefault('response', []).append(_response_log)
+        self._origin = origin
         super().__init__(*args, event_hooks=hooks, **kwargs)
 
     def send(self, request, **kwargs):
-        try:
-            return super().send(request, **kwargs)
-        except httpx.RequestError as error:
+        category, route = _route(request, self._origin)
+        method = request.method if request.method in {'GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'} else 'OTHER'
+        # No tracing headers are injected into requests to third parties.
+        with span('vigilo ' + method, kind=SpanKind.CLIENT, attributes={
+            'http.request.method': method, 'http.route': route, 'vigilo.origin': category,
+        }) as current:
             try:
-                failed_request = error.request
-            except RuntimeError:
-                failed_request = request
-            _finish_log(failed_request, error=error)
-            raise
+                response = super().send(request, **kwargs)
+                current.set_attribute('http.response.status_code', response.status_code)
+                if response.status_code >= 400:
+                    current.set_status(Status(StatusCode.ERROR, 'Vigilo HTTP request failed'))
+                return response
+            except httpx.RequestError as error:
+                try:
+                    failed_request = error.request
+                except RuntimeError:
+                    failed_request = request
+                _finish_log(failed_request, error=error)
+                raise
 
 
 def logged_get(url, *, origin: str, timeout=5.0, follow_redirects=False, **kwargs):

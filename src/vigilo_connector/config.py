@@ -22,7 +22,7 @@ REDIRECT_URI = os.environ.get("VIGILO_REDIRECT_URI", "app://ch-parent-android.vi
 SCOPE = "openid vigiloprofile offline_access"
 
 CONFIG_DIR = Path(
-    os.environ.get("VIGILO_CONFIG_DIR", Path.home() / ".config" / "vigilo-connector")
+    os.environ.get("VIGILO_CONFIG_DIR", Path(os.environ.get("DATA_DIR", "/data")) / "vigilo")
 )
 CONFIG_FILE = CONFIG_DIR / "config.json"
 TOKEN_FILE = CONFIG_DIR / "tokens.json"
@@ -36,7 +36,7 @@ def load_client_credentials() -> tuple[str, str]:
         return client_id, client_secret
     if CONFIG_FILE.exists():
         cfg = json.loads(CONFIG_FILE.read_text())
-        return cfg.get("client_id", ""), cfg.get("client_secret", "")
+        return os.environ.get("VIGILO_CLIENT_ID", cfg.get("client_id", "")), os.environ.get("VIGILO_CLIENT_SECRET", cfg.get("client_secret", ""))
     return client_id, client_secret
 
 

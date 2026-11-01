@@ -1,4 +1,4 @@
-# Remote MCP-gateway for vigilo-connector. Se docs/remote-gateway.md og README.
+# Internal HTTP backend. See docs/remote-gateway.md.
 ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.13-slim
 FROM ${PYTHON_IMAGE} AS build
 WORKDIR /src
@@ -18,7 +18,7 @@ ENV DATA_DIR=/data \
     PYTHONDONTWRITEBYTECODE=1
 USER vigilo
 VOLUME ["/data"]
-EXPOSE 8000
+EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s \
-    CMD ["python", "-c", "import os,urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",\"8000\")}/healthz', timeout=4)"]
-CMD ["vigilo-gateway"]
+    CMD ["python", "-c", "import os,urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",\"8080\")}/healthz', timeout=4)"]
+CMD ["vigilo-mcp"]

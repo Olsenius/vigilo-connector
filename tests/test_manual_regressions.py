@@ -6,12 +6,11 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
-from tests.gateway.test_app import API_TOKEN, PUBLIC, _mcp_session, _rpc, _sse_json
+from tests.http_wire import API_TOKEN, PUBLIC, _mcp_session, _rpc, _sse_json
 from tests.test_parent_actions import FakeStore, transport
 from vigilo_connector import config, server
 from vigilo_connector.client import VigiloClient
-from vigilo_connector.gateway import app as gateway
-from vigilo_connector.gateway.settings import load_settings
+from vigilo_connector.http_app import Service, create_app
 
 PROFILE_URL = 'https://images.example.test/avatar?sig=synthetic-profile-signature'
 ATTACHMENT_URL = 'https://files.example.test/plan.pdf?sig=synthetic-attachment-signature'
@@ -28,10 +27,11 @@ def real_client():
 def wire(tmp_path, monkeypatch, real_client):
     monkeypatch.setattr(config, 'CONFIG_DIR', tmp_path / 'vigilo')
     monkeypatch.setattr(config, 'CONFIG_FILE', tmp_path / 'vigilo' / 'config.json')
-    settings = load_settings({'DATA_DIR': str(tmp_path), 'PUBLIC_URL': PUBLIC,
-                             'ADMIN_PASSWORD': 'synthetic-password-123', 'API_TOKEN': API_TOKEN})
     previous = server._client
-    application = gateway.create_app(settings, PUBLIC, vigilo_client=real_client)
+    service = Service()
+    service.client.close()
+    service.client = real_client
+    application = create_app(API_TOKEN, service)
     with TestClient(application, base_url=PUBLIC) as http:
         session = _mcp_session(http, API_TOKEN)
         def call(name, arguments):
