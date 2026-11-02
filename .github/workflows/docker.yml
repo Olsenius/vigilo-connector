@@ -81,7 +81,7 @@ jobs:
           assert len(tools) == 47, len(tools)
           assert any(tool['name'] == 'list_children' for tool in tools)
           PYTHON
-          docker logs smoke 2>&1 | grep -q 'Uvicorn running'
+          docker logs smoke 2>&1 | grep 'Uvicorn running' >/dev/null
 
       - name: Logg inn på GHCR
         if: github.event_name != 'pull_request'
