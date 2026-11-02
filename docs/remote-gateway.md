@@ -13,7 +13,7 @@ The internal HTTP API requires bearer authentication except `GET /healthz`:
 - `GET /healthz?check=1`: read-only Vigilo connectivity check, 200 or 503. Plain liveness never contacts Vigilo.
 - `POST /setup/start`, `/setup/complete`, `/setup/cancel`: see the gateway setup contract.
 
-Use the gateway's optional `compose.vigilo.yaml` overlay. It builds this checkout and attaches it to the internal network without publishing backend ports. Open the gateway admin page, select Vigilo, save credentials, then press **Logg inn**. Follow the link, log in at Vigilo and paste the full return URL. If the browser reports an unknown app protocol, inspect the address or the authorize response's Location header in its Network tab. Use a browser/device without the Vigilo app consuming the code. The URL must include the matching state. Start again after an expired, invalid or already consumed attempt.
+Use the [gateway's Compose example](https://github.com/Olsenius/mcp-gateway#quick-start-docker-compose). It runs the published `ghcr.io/olsenius/vigilo-connector` image on the internal network without publishing backend ports. To run this checkout instead, use [mcp-workspace](https://github.com/Olsenius/mcp-workspace)'s `task dev:up`. Open the gateway admin page, select Vigilo, save credentials, then press **Logg inn**. Follow the link, log in at Vigilo and paste the full return URL. If the browser reports an unknown app protocol, inspect the address or the authorize response's Location header in its Network tab. Use a browser/device without the Vigilo app consuming the code. The URL must include the matching state. Start again after an expired, invalid or already consumed attempt.
 
 V2 initially accepts full state-bearing return URLs only. Bare codes, cookie/cURL imports and token-file uploads are not exposed in the web UI: there is no implicit fallback that bypasses the state check. This is a deliberate compatibility reduction from the old setup page. Automatic callback is not implemented because support for a controlled HTTPS redirect URI has not been established.
 
@@ -26,7 +26,7 @@ V2 initially accepts full state-bearing return URLs only. Bare codes, cookie/cUR
 5. Verify liveness, unauthorized MCP rejection, settings, and a read-only Test through gateway admin. Verify one read-only MCP call through `https://mcp.example.test/vigilo/mcp`.
 6. Reconnect MCP clients to that gateway URL and approve them there. Old Vigilo OAuth client grants are not migrated. Existing Vigilo API login can be preserved through the token files.
 
-For rollback stop the new backend first, then give the old backend the **current** token file before restarting its previous image/config. A backup token from before refresh may already be invalid. Never run both token holders at once. Preserve gateway and Vigilo data while switching images. Repository/GHCR renaming is a separate publishing operation; this local overlay uses a local image until that is complete.
+For rollback stop the new backend first, then give the old backend the **current** token file before restarting its previous image/config. A backup token from before refresh may already be invalid. Never run both token holders at once. Preserve gateway and Vigilo data while switching images.
 
 ## Verification limitations
 

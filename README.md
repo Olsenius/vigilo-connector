@@ -14,9 +14,11 @@ Install with `pip install -e '.[dev]'`, set `MCP_AUTH_TOKEN` and `DATA_DIR`, the
 run `vigilo-mcp`. Default port: 8080. Run one worker. No stdio or login CLI is
 needed. Configure credentials and log in through the gateway admin page.
 
-For Docker, use the gateway repository's `compose.vigilo.yaml` overlay, or the
-internal backend example in `docker/compose.yml`. Backend ports should remain
-on the internal network. The gateway provides public OAuth and the tunnel.
+For Docker, use the [gateway's Compose example](https://github.com/Olsenius/mcp-gateway#quick-start-docker-compose), which runs the gateway, this server
+and the other MCP servers, or the internal backend example in `docker/compose.yml`.
+Backend ports should remain on the internal network. The gateway provides public
+OAuth and the tunnel. To develop the server together with the gateway, use
+[mcp-workspace](https://github.com/Olsenius/mcp-workspace).
 
 Environment variables `VIGILO_CLIENT_ID` and `VIGILO_CLIENT_SECRET` override
 stored credentials. Secrets and rotating tokens stay in the backend's data
