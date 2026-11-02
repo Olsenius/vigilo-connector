@@ -16,6 +16,26 @@ from .client import VigiloClient
 from .telemetry import TraceHTTP, configure
 
 
+class SetupError(ValueError):
+    """A login problem with a fixed code and message. Neither ever contains
+    the pasted input, so the gateway can show them safely."""
+
+    MESSAGES = {
+        'attempt_expired': 'Innloggingsforsøket er gått ut eller allereie brukt. Start på nytt.',
+        'paste_required': 'Lim inn heile app://-returadressa.',
+        'authorize_url_pasted': 'Dette er innloggingslenka, ikkje returadressa. Opne lenka, logg inn, og lim inn adressa nettlesaren prøver å opne til slutt. Ho byrjar med app:// og inneheld code= og state=.',
+        'provider_error': 'Vigilo avbraut innlogginga. Start på nytt.',
+        'missing_code': 'Returadressa manglar éin code=. Lim inn heile app://-adressa frå slutten av innlogginga.',
+        'state_mismatch': 'Returadressa høyrer til eit anna innloggingsforsøk. Start på nytt og bruk lenka frå det nye forsøket.',
+        'exchange_failed': 'Vigilo godtok ikkje koden. Han kan vere brukt (t.d. av Vigilo-appen) eller gått ut. Start på nytt og lim inn adressa med ein gong.',
+        'service_unreachable': 'Fekk ikkje kontakt med Vigilo. Prøv igjen om litt.',
+    }
+
+    def __init__(self, code):
+        super().__init__(self.MESSAGES[code])
+        self.code = code
+
+
 class Service:
     def __init__(self):
         self.tokens = auth.TokenStore(config.TOKEN_FILE)
@@ -82,15 +102,28 @@ class Service:
         with self.lock:
             attempt = self.attempts.pop(body.get('attempt_id', ''), None)
             if not attempt or attempt[1] <= time.time():
-                raise ValueError('Login attempt expired or already used; start again')
+                raise SetupError('attempt_expired')
             raw = body.get('input', '')
-            if not isinstance(raw, str):
-                raise ValueError('Paste the full return URL')
-            query = parse_qs(urlsplit(raw.strip()).query)
-            if query.get('state') != [attempt[0]] or len(query.get('code', [])) != 1:
-                raise ValueError('Return URL must contain the matching state and one code; start again')
+            if not isinstance(raw, str) or not raw.strip():
+                raise SetupError('paste_required')
+            parts = urlsplit(raw.strip())
+            query = parse_qs(parts.query)
+            if 'error' in query:
+                raise SetupError('provider_error')
+            if 'code' not in query and (parts.path.rstrip('/').endswith('/connect/authorize') or 'response_type' in query):
+                raise SetupError('authorize_url_pasted')
+            if len(query.get('code', [])) != 1:
+                raise SetupError('missing_code')
+            if query.get('state') != [attempt[0]]:
+                raise SetupError('state_mismatch')
             with self.tokens._lock:
-                self.tokens.save(auth.exchange_code(query['code'][0]))
+                try:
+                    tokens = auth.exchange_code(query['code'][0])
+                except auth.AuthError:
+                    raise SetupError('exchange_failed') from None
+                except httpx.HTTPError:
+                    raise SetupError('service_unreachable') from None
+                self.tokens.save(tokens)
                 self.generation += 1
                 self.verified = False
                 self.client._read_cache.clear()
@@ -161,6 +194,8 @@ def create_app(token, service=None):
             else:
                 result = await run_in_threadpool(service.cancel, body)
             return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+        except SetupError as e:
+            return JSONResponse({'error': str(e), 'code': e.code}, status_code=400, headers={'Cache-Control': 'no-store'})
         except (ValueError, TypeError, auth.AuthError, httpx.HTTPError):
             return JSONResponse({'error': 'Handlinga feila. Kontroller innstillingane og start innlogginga på nytt.'}, status_code=400, headers={'Cache-Control': 'no-store'})
 

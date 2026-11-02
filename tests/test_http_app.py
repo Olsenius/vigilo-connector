@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from vigilo_connector import config, auth
-from vigilo_connector.http_app import Service, create_app
+from vigilo_connector.http_app import Service, SetupError, create_app
 
 
 @pytest.fixture
@@ -172,3 +172,56 @@ def test_old_health_result_cannot_verify_changed_credentials(service, monkeypatc
     assert not worker.is_alive()
     assert not results[0]['ok']
     assert service.document()['setup']['status'] == 'login_required'
+
+
+@pytest.mark.parametrize('make_input, code', [
+    (lambda state: '', 'paste_required'),
+    (lambda state: 'https://auth.example.test/connect/authorize?' + urlencode(dict(client_id='test-client', response_type='code', scope='openid', state=state)), 'authorize_url_pasted'),
+    (lambda state: 'app://test?' + urlencode(dict(error='access_denied', state=state)), 'provider_error'),
+    (lambda state: 'app://test?' + urlencode(dict(state=state)), 'missing_code'),
+    (lambda state: 'app://test?' + urlencode(dict(state='other-attempt', code='test-code')), 'state_mismatch'),
+])
+def test_login_errors_have_fixed_codes(service, monkeypatch, make_input, code):
+    monkeypatch.setattr(auth, 'authorize_url', lambda state: 'https://login.example/authorize')
+    monkeypatch.setattr(auth, 'exchange_code', lambda c: pytest.fail('must not exchange a rejected return URL'))
+    attempt = service.start()
+    state = service.attempts[attempt['attempt_id']][0]
+    pasted = make_input(state)
+    with pytest.raises(SetupError) as err:
+        service.complete(dict(attempt_id=attempt['attempt_id'], input=pasted))
+    assert err.value.code == code
+    assert state not in str(err.value) and (not pasted or pasted not in str(err.value))
+    assert not service.tokens.path.exists()
+
+
+@pytest.mark.parametrize('failure, code', [
+    (auth.AuthError('Token-kall avvist (400): invalid_grant'), 'exchange_failed'),
+    (httpx.ConnectError('down'), 'service_unreachable'),
+])
+def test_login_exchange_failures(service, monkeypatch, failure, code):
+    monkeypatch.setattr(auth, 'authorize_url', lambda state: 'https://login.example/authorize')
+    def fail(c):
+        raise failure
+    monkeypatch.setattr(auth, 'exchange_code', fail)
+    attempt = service.start()
+    state = service.attempts[attempt['attempt_id']][0]
+    with pytest.raises(SetupError) as err:
+        service.complete(dict(attempt_id=attempt['attempt_id'], input='app://test?' + urlencode(dict(state=state, code='test-code'))))
+    assert err.value.code == code and 'invalid_grant' not in str(err.value)
+    with pytest.raises(SetupError) as again:
+        service.complete(dict(attempt_id=attempt['attempt_id'], input='app://test?' + urlencode(dict(state=state, code='test-code'))))
+    assert again.value.code == 'attempt_expired'
+
+
+def test_http_setup_error_code(service, monkeypatch):
+    monkeypatch.setattr(auth, 'authorize_url', lambda state: 'https://login.example/authorize')
+    async def run():
+        app = create_app('internal-test-token', service)
+        headers = {'Authorization': 'Bearer internal-test-token'}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://localhost') as c:
+            attempt = (await c.post('/setup/start', headers=headers, json={})).json()
+            pasted = 'https://auth.example.test/connect/authorize?response_type=code&state=x'
+            r = await c.post('/setup/complete', headers=headers, json=dict(attempt_id=attempt['attempt_id'], input=pasted))
+            assert r.status_code == 400
+            assert r.json()['code'] == 'authorize_url_pasted' and pasted not in r.text
+    asyncio.run(run())
